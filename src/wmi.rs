@@ -243,6 +243,27 @@ impl Wmi {
         self.read_scalar(&out, "gmOutput")
     }
 
+    /// Invoke a *reader* taking a `UInt32 gmInput` and returning a
+    /// `UInt8Array gmOutput` plus a `UInt8 gmReturn` status.
+    ///
+    /// This is the shape of `GetGamingLED` and `GetGamingKBBacklight`. The
+    /// observed packet is 15 bytes wide. `gmReturn` is a validity code: `0`
+    /// means the payload is real, non-zero means this `gmInput` selector has no
+    /// answer (see the probe findings) — callers should treat non-zero as
+    /// "absent", not as an error.
+    pub fn call_read_bytes(&self, method: &str, gm_input: u32) -> Result<(Vec<u8>, u8)> {
+        let out = self.invoke(method, |in_params| unsafe {
+            let v = VARIANT::from(gm_input as i32);
+            in_params.Put(&BSTR::from("gmInput"), 0, &v, 0)?;
+            Ok(())
+        })?;
+
+        let bytes = self.read_byte_array(&out, "gmOutput")?;
+        let status = u8::try_from(self.read_scalar(&out, "gmReturn").unwrap_or(0) & 0xFF)
+            .unwrap_or(0);
+        Ok((bytes, status))
+    }
+
     /// Shared invoke path: clone the method's in-params, let `fill` populate
     /// them, execute, hand back the out-params object.
     fn invoke<F>(&self, method: &str, fill: F) -> Result<IWbemClassObject>
@@ -298,6 +319,48 @@ impl Wmi {
             i64::try_from(&v)
                 .map(|n| n as u64)
                 .map_err(|_| WmiError::Protocol(format!("{name} was not an integer")))
+        }
+    }
+
+    /// Pull a named `VT_ARRAY | VT_UI1` out-parameter into an owned `Vec<u8>`.
+    fn read_byte_array(&self, out: &IWbemClassObject, name: &str) -> Result<Vec<u8>> {
+        use windows::Win32::System::Com::SAFEARRAY;
+        use windows::Win32::System::Ole::{
+            SafeArrayAccessData, SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayUnaccessData,
+        };
+        use windows::Win32::System::Variant::{VT_ARRAY, VT_UI1};
+
+        unsafe {
+            let mut v = VARIANT::default();
+            out.Get(&BSTR::from(name), 0, &mut v, None, None)?;
+
+            // Reuse the layout mirror to reach `parray` — windows_core exposes
+            // no typed accessor for the array arm. `as_raw` hands us the same
+            // repr(C) bytes RawVariant models.
+            let raw: &RawVariant = &*(v.as_raw() as *const _ as *const RawVariant);
+            if raw.vt != (VT_ARRAY.0 | VT_UI1.0) {
+                return Err(WmiError::Protocol(format!(
+                    "{name} was not a byte array (vt=0x{:04X})",
+                    raw.vt
+                )));
+            }
+
+            let sa = raw.parray as *const SAFEARRAY;
+            if sa.is_null() {
+                return Ok(Vec::new());
+            }
+
+            let lo = SafeArrayGetLBound(sa, 1)?;
+            let hi = SafeArrayGetUBound(sa, 1)?;
+            let len = (hi - lo + 1).max(0) as usize;
+
+            let mut data: *mut core::ffi::c_void = std::ptr::null_mut();
+            SafeArrayAccessData(sa, &mut data)?;
+            let slice = std::slice::from_raw_parts(data as *const u8, len);
+            let owned = slice.to_vec();
+            let _ = SafeArrayUnaccessData(sa);
+
+            Ok(owned)
         }
     }
 }

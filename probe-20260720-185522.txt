@@ -1,0 +1,190 @@
+colormemuch WMI probe - 2026-07-20T18:55:22.9932105-05:00
+host=CYPHER user=CYPHER\csant elevated=True
+
+=== CONTENDING PROCESSES ===
+  AcerAgentService (pid 6764)
+  AcerCCAgent (pid 5908)
+  AcerCentralService (pid 5680)
+  AcerDIAgent (pid 5876)
+  AcerEZService (pid 5692)
+  AcerGAICameraService (pid 5724)
+  AcerGAICameraW (pid 29156)
+  AcerHardwareService (pid 24940)
+  AcerLightingService (pid 5748)
+  AcerORDService (pid 5784)
+  AcerPixyService (pid 5808)
+  AcerQAAgent (pid 5832)
+  AcerService (pid 7380)
+  AcerServiceWrapper (pid 5848)
+  AcerSysHardwareService (pid 3316)
+  AcerSysMonitorService (pid 16404)
+  AcerSystemCentralService (pid 5884)
+  PredatorSense (pid 5600)
+  PredatorSense (pid 14416)
+  PredatorSense (pid 21684)
+  PredatorSense (pid 26880)
+
+=== CLASS ===
+  Description = Class used to Gaming Function, Version 2.94
+  dynamic = True
+  guid = {7A4DDFE7-5B5D-40B4-8595-4408E0CC7F56}
+  Locale = MS\0x409
+  provider = WmiProv
+  WMI = True
+
+=== METHOD SIGNATURES ===
+  SetGamingProfile(UInt64 gmInput, UInt32 gmOutput)
+  SetGamingLED(UInt8Array gmInput, UInt32 gmOutput)
+  GetGamingProfile(UInt32 gmInput, UInt64 gmOutput)
+  GetGamingLED(UInt32 gmInput, UInt8Array gmOutput, UInt8 gmReturn)
+  GetGamingSysInfo(UInt32 gmInput, UInt64 gmOutput)
+  SetGamingRgbKb(UInt64 gmInput, UInt32 gmOutput)
+  GetGamingRgbKb(UInt32 gmInput, UInt64 gmOutput)
+  SetGamingProfileSetting(UInt64 gmInput, UInt32 gmOutput)
+  GetGamingProfileSetting(UInt32 gmInput, UInt64 gmOutput)
+  SetGamingLEDBehavior(UInt64 gmInput, UInt32 gmOutput)
+  GetGamingLEDBehavior(UInt32 gmInput, UInt64 gmOutput)
+  SetGamingLEDColor(UInt64 gmInput, UInt32 gmOutput)
+  GetGamingLEDColor(UInt32 gmInput, UInt64 gmOutput)
+  SetGamingFanBehavior(UInt64 gmInput, UInt32 gmOutput)
+  GetGamingFanBehavior(UInt32 gmInput, UInt64 gmOutput)
+  SetGamingFanSpeed(UInt64 gmInput, UInt32 gmOutput)
+  GetGamingFanSpeed(UInt32 gmInput, UInt64 gmOutput)
+  SetGamingFanTable(UInt64 gmInput, UInt32 gmOutput)
+  GetGamingFanTable(UInt64 gmOutput)
+  SetGamingKBBacklight(UInt8Array gmInput, UInt32 gmOutput)
+  GetGamingKBBacklight(UInt32 gmInput, UInt8Array gmOutput, UInt8 gmReturn)
+  SetGamingMiscSetting(UInt64 gmInput, UInt32 gmOutput)
+  GetGamingMiscSetting(UInt32 gmInput, UInt64 gmOutput)
+  SetCPUOverclockingProfile(UInt8 OCProfile, UInt8Array OCStructure, UInt8Array Reserved, UInt8 ReturnCode)
+  GetCPUOverclockingProfile(UInt8Array Reserved, UInt8Array OCStructure, UInt8 ReturnCode, UInt8 ReturnOCProfile)
+
+=== INSTANCE ===
+  InstanceName = ACPI\PNP0C14\APGe_0
+  Active = True
+
+=== READ SWEEP (gmInput 0..8) ===
+--- GetGamingProfile ---
+  [0] 0x00FF000001000000  (71776119077994496)
+  [1] 0x0000000000000002  (2)
+  [2] 0x0000000000000002  (2)
+  [3] 0x0000000000000002  (2)
+  [4] 0x0000000000000002  (2)
+  [5] 0x0000000000000002  (2)
+  [6] 0x0000000000000002  (2)
+  [7] 0x0000000000000002  (2)
+  [8] 0x0000000000000002  (2)
+
+--- GetGamingLED ---
+  [0] [00 00 00 00 00 00 00 00 00 00 00 00 00 00 00] (15 bytes) gmReturn=2
+  [1] [00 00 00 00 00 00 00 00 00 00 00 00 00 00 00] (15 bytes) gmReturn=0
+  [2] [00 00 00 00 00 00 00 00 00 00 00 00 00 00 00] (15 bytes) gmReturn=1
+  [3] [00 00 00 00 00 00 00 00 00 00 00 00 00 00 00] (15 bytes) gmReturn=1
+  [4] [00 00 00 00 00 00 00 00 00 00 00 00 00 00 00] (15 bytes) gmReturn=1
+  [5] [00 00 00 00 00 00 00 00 00 00 00 00 00 00 00] (15 bytes) gmReturn=1
+  [6] [00 00 00 00 00 00 00 00 00 00 00 00 00 00 00] (15 bytes) gmReturn=1
+  [7] [00 00 00 00 00 00 00 00 00 00 00 00 00 00 00] (15 bytes) gmReturn=1
+  [8] [00 00 00 00 0F 00 00 00 00 00 00 00 00 00 00] (15 bytes) gmReturn=0
+
+--- GetGamingSysInfo ---
+  [0] 0x0000000227000000  (9244246016)
+  [1] 0x0000000000000000  (0)
+  [2] 0x0000010000000000  (1099511627776)
+  [3] 0x0000000000000002  (2)
+  [4] 0x0000000000000002  (2)
+  [5] 0x0000000000000002  (2)
+  [6] 0x0000000000000002  (2)
+  [7] 0x0000000000000002  (2)
+  [8] 0x0000000000000002  (2)
+
+--- GetGamingRgbKb ---
+  [0] 0x0000000000000001  (1)
+  [1] 0x00000000C7AE0000  (3350069248)
+  [2] 0x00000000C7AE0000  (3350069248)
+  [3] 0x0000000000000000  (0)
+  [4] 0x00000000C7AE0000  (3350069248)
+  [5] 0x0000000000000000  (0)
+  [6] 0x0000000000000000  (0)
+  [7] 0x0000000000000000  (0)
+  [8] 0x00000000C7AE0000  (3350069248)
+
+--- GetGamingProfileSetting ---
+  [0] 0x0000000000000002  (2)
+  [1] 0x0000000000000001  (1)
+  [2] 0x0000000000000001  (1)
+  [3] 0x0000000000000001  (1)
+  [4] 0x0000000000000002  (2)
+  [5] 0x0000000000000002  (2)
+  [6] 0x0000000000000002  (2)
+  [7] 0x0000000000000002  (2)
+  [8] 0x0000000000000002  (2)
+
+--- GetGamingLEDBehavior ---
+  [0] 0x0000000000000002  (2)
+  [1] 0x0000000000000100  (256)
+  [2] 0x0000000000000001  (1)
+  [3] 0x0000000000000100  (256)
+  [4] 0x0000000000000001  (1)
+  [5] 0x0000000000000100  (256)
+  [6] 0x0000000000000001  (1)
+  [7] 0x0000000000000100  (256)
+  [8] 0x0000000000000001  (1)
+
+--- GetGamingLEDColor ---
+  [0] 0x0000000000000002  (2)
+  [1] 0x00000564C7AE0000  (5930404937728)
+  [2] 0x0000000000000001  (1)
+  [3] 0x0000000000000001  (1)
+  [4] 0x0000000000000001  (1)
+  [5] 0x0000000000000001  (1)
+  [6] 0x0000000000000001  (1)
+  [7] 0x0000000000000001  (1)
+  [8] 0x0000000000000001  (1)
+
+--- GetGamingFanBehavior ---
+  [0] 0x0000000000000002  (2)
+  [1] 0x0000000000000100  (256)
+  [2] 0x0000000000000001  (1)
+  [3] 0x0000000000000100  (256)
+  [4] 0x0000000000000001  (1)
+  [5] 0x0000000000000100  (256)
+  [6] 0x0000000000000001  (1)
+  [7] 0x0000000000000100  (256)
+  [8] 0x0000000000004000  (16384)
+
+--- GetGamingFanSpeed ---
+  [0] 0x0000000000000002  (2)
+  [1] 0x0000000000000000  (0)
+  [2] 0x0000000000000001  (1)
+  [3] 0x0000000000000001  (1)
+  [4] 0x0000000000000000  (0)
+  [5] 0x0000000000000001  (1)
+  [6] 0x0000000000000001  (1)
+  [7] 0x0000000000000001  (1)
+  [8] 0x0000000000000001  (1)
+
+--- GetGamingKBBacklight ---
+  [0] [00 00 00 00 00 00 00 00 00 00 00 00 00 00 00] (15 bytes) gmReturn=1
+  [1] [00 05 64 00 01 00 AE C7 00 00 00 00 00 00 00] (15 bytes) gmReturn=0
+  [2] [00 00 00 00 00 00 00 00 00 00 00 00 00 00 00] (15 bytes) gmReturn=1
+  [3] [00 05 64 00 01 00 AE C7 00 00 00 00 00 00 00] (15 bytes) gmReturn=0
+  [4] [00 00 00 00 00 00 00 00 00 00 00 00 00 00 00] (15 bytes) gmReturn=1
+  [5] [00 05 64 00 01 00 AE C7 00 00 00 00 00 00 00] (15 bytes) gmReturn=0
+  [6] [00 00 00 00 00 00 00 00 00 00 00 00 00 00 00] (15 bytes) gmReturn=1
+  [7] [00 05 64 00 01 00 AE C7 00 00 00 00 00 00 00] (15 bytes) gmReturn=0
+  [8] [00 00 00 00 00 00 00 00 00 00 00 00 00 00 00] (15 bytes) gmReturn=1
+
+--- GetGamingMiscSetting ---
+  [0] 0x0000000000000002  (2)
+  [1] 0x0000000000000000  (0)
+  [2] 0x0000000000000100  (256)
+  [3] 0x0000000000000001  (1)
+  [4] 0x0000000000000001  (1)
+  [5] 0x0000000000000001  (1)
+  [6] 0x0000000000000100  (256)
+  [7] 0x000000000000FF00  (65280)
+  [8] 0x0000000000000100  (256)
+
+--- GetGamingFanTable ---
+  0x0000000000000001
+
