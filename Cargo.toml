@@ -15,6 +15,18 @@ dirs = "5"
 rfd = "0.14"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Rpc",
+    "Win32_System_Variant",
+    "Win32_System_Wmi",
+    "Win32_Security",
+] }
+windows-core = "0.58"
+
 [build-dependencies]
 winres = "0.1"
 

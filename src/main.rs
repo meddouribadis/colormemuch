@@ -3,6 +3,8 @@
 mod app;
 mod config;
 mod git_update;
+#[cfg(windows)]
+mod wmi;
 
 use eframe::egui;
 
