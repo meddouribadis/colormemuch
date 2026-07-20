@@ -20,6 +20,8 @@ fn main() {
         println!("cargo:rustc-link-arg=/STACK:8388608");
 
         let mut res = winres::WindowsResource::new();
+        // Embeds requireAdministrator — the Acer WMI class is admin-only.
+        res.set_manifest_file("assets/colormemuch.manifest");
         res.set("ProductName", env!("CARGO_PKG_NAME"));
         res.set("FileDescription", env!("CARGO_PKG_DESCRIPTION"));
         res.set("FileVersion", &full_version);
