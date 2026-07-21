@@ -1,0 +1,74 @@
+colormemuch write matrix — epoch 1784596341
+16 shots. gmOutput: 0x0 = accepted, 0x1 = rejected.
+
+[0] enter static mode (KBBacklight mode=0, enable)
+    SetGamingKBBacklight <- [00 00 64 00 01 FF 00 00 00 01 00 00 00 00 00 00] (16 bytes)
+    gmOutput = 0x0
+
+[1] RgbKb zone 0x1 RED
+    SetGamingRgbKb <- 0x000000000000FF01
+    ERROR: COM error: 0x80041005
+
+[2] RgbKb zone 0x2 RED
+    SetGamingRgbKb <- 0x000000000000FF02
+    ERROR: COM error: 0x80041005
+
+[3] RgbKb zone 0x4 RED
+    SetGamingRgbKb <- 0x000000000000FF04
+    ERROR: COM error: 0x80041005
+
+[4] RgbKb zone 0x8 RED
+    SetGamingRgbKb <- 0x000000000000FF08
+    ERROR: COM error: 0x80041005
+
+[5] RgbKb zone 0x1 GREEN
+    SetGamingRgbKb <- 0x0000000000FF0001
+    ERROR: COM error: 0x80041005
+
+[6] RgbKb zone 0x2 GREEN
+    SetGamingRgbKb <- 0x0000000000FF0002
+    ERROR: COM error: 0x80041005
+
+[7] RgbKb zone 0x4 GREEN
+    SetGamingRgbKb <- 0x0000000000FF0004
+    ERROR: COM error: 0x80041005
+
+[8] RgbKb zone 0x8 GREEN
+    SetGamingRgbKb <- 0x0000000000FF0008
+    ERROR: COM error: 0x80041005
+
+[9] RgbKb zone 0x1 BLUE
+    SetGamingRgbKb <- 0x00000000FF000001
+    ERROR: COM error: 0x80041005
+
+[10] RgbKb zone 0x2 BLUE
+    SetGamingRgbKb <- 0x00000000FF000002
+    ERROR: COM error: 0x80041005
+
+[11] RgbKb zone 0x4 BLUE
+    SetGamingRgbKb <- 0x00000000FF000004
+    ERROR: COM error: 0x80041005
+
+[12] RgbKb zone 0x8 BLUE
+    SetGamingRgbKb <- 0x00000000FF000008
+    ERROR: COM error: 0x80041005
+
+[13] LEDBehavior sel1 behavior1
+    SetGamingLEDBehavior <- 0x0000000000000101
+    ERROR: COM error: 0x80041005
+
+[14] LEDColor sel1 RED
+    SetGamingLEDColor <- 0x000000640000FF01
+    ERROR: COM error: 0x80041005
+
+[15] LEDColor sel1 GREEN
+    SetGamingLEDColor <- 0x0000006400FF0001
+    ERROR: COM error: 0x80041005
+
+done.
+
+=== SERVICE OBSERVATIONS ===
+service before:      Running
+service after stop:  Stopped
+service after run:   Stopped
+service restored:    Running

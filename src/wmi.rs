@@ -218,9 +218,11 @@ impl Wmi {
     /// The meaning of the packed bits is method-specific and lives in `rgb.rs`.
     pub fn call_packed(&self, method: &str, gm_input: u64) -> Result<u64> {
         let out = self.invoke(method, |in_params| unsafe {
-            // WMI has no unsigned-64 VARIANT type; the provider expects the
-            // bits reinterpreted as a signed 64-bit integer.
-            let v = VARIANT::from(gm_input as i64);
+            // CIM uint64 parameters are NOT passed as integer VARIANTs — WMI's
+            // convention marshals 64-bit values as decimal *strings* (VT_BSTR).
+            // Passing VT_I8 here fails with 0x80041005 WBEM_E_TYPE_MISMATCH
+            // (verified on hardware 2026-07-20).
+            let v = VARIANT::from(BSTR::from(gm_input.to_string()));
             in_params.Put(&BSTR::from("gmInput"), 0, &v, 0)?;
             Ok(())
         })?;
