@@ -1,0 +1,21 @@
+colormemuch write matrix — epoch 1784593443
+4 shots, ~3s apart. gmOutput is the key column:
+a code that differs from the known-rejected 0x1 is the one to trust.
+
+[0] t+0s  baseline breath (8=0,9=0) — expect 0x1
+    SetGamingKBBacklight <- [01 05 64 00 01 00 FF 00 00 00 00 00 00 00 00 00] (16 bytes)
+    gmOutput = 0x1
+
+[1] t+3s  nekro-sense breath (8=3,9=1)
+    SetGamingKBBacklight <- [01 05 64 00 01 00 FF 00 03 01 00 00 00 00 00 00] (16 bytes)
+    gmOutput = 0x0
+
+[2] t+6s  enable-only breath (9=1)
+    SetGamingKBBacklight <- [01 05 64 00 01 00 FF 00 00 01 00 00 00 00 00 00] (16 bytes)
+    gmOutput = 0x0
+
+[3] t+9s  static 4-byte all-zones green
+    SetGamingKBBacklight <- [0F 00 FF 00] (4 bytes)
+    ERROR: COM error: WDM specific return code: 0 (0x80041008)
+
+done — note WHICH step (if any) turned the keyboard green and whether it stuck.

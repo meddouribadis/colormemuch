@@ -164,16 +164,27 @@ pub enum Effect {
 }
 
 /// Build the 4-byte per-zone static packet: `[zone_bitmask, R, G, B]`.
+///
+/// NOTE: this is NOT accepted by `SetGamingKBBacklight` — that method rejects a
+/// 4-byte array with WBEM_E_INVALID_PARAMETER (verified 2026-07-20); it wants a
+/// 16-byte effect packet. Per-zone static color almost certainly routes through
+/// `SetGamingRgbKb` (the `UInt64` method) instead, which is not yet wired up.
+/// Kept for when that path is decoded.
 pub fn static_zone_payload(zones: u8, color: Rgb) -> [u8; 4] {
     [zones, color.0, color.1, color.2]
 }
 
 /// Build the 16-byte effect packet.
 ///
-/// `[mode, speed, brightness, 0, direction, R, G, B, 0, 0, 0, 0, 0, 0, 0, 0]`.
-/// `brightness` is clamped to 0..=100, `direction` to 1..=2. The trailing bytes
-/// are the least-certain part of the format (sources disagree on bytes 8-9);
-/// they are zeroed here and revisited if hardware rejects the packet.
+/// `[mode, speed, brightness, 0, direction, R, G, B, 0, EN, 0, 0, 0, 0, 0, 0]`.
+/// `brightness` is clamped to 0..=100, `direction` to 1..=2.
+///
+/// Byte 9 is the **enable flag** and MUST be 1 or firmware rejects the packet
+/// (`gmOutput=0x1`, no visible change). Verified on CYPHER 2026-07-20: the same
+/// packet with byte 9 = 0 returned 0x1, with byte 9 = 1 returned 0x0 (accepted).
+/// Byte 8 (nekro-sense sets 3) turned out irrelevant to acceptance and is left
+/// 0 here except where an effect needs it. The method also strictly requires 16
+/// bytes — a 4-byte packet is rejected with WBEM_E_INVALID_PARAMETER.
 pub fn effect_payload(effect: Effect, speed: u8, brightness: u8, direction: u8, color: Rgb) -> [u8; 16] {
     let mut p = [0u8; 16];
     p[0] = effect as u8;
@@ -184,6 +195,7 @@ pub fn effect_payload(effect: Effect, speed: u8, brightness: u8, direction: u8, 
     p[5] = color.0;
     p[6] = color.1;
     p[7] = color.2;
+    p[9] = 1; // enable — required; without it the write is a no-op.
     p
 }
 
@@ -321,6 +333,8 @@ mod tests {
         // Mirrors CYPHER's own descriptor: speed 5, brightness 100, direction 1.
         let p = effect_payload(Effect::Breath, 5, 100, 1, Rgb(0x00, 0xAE, 0xC7));
         assert_eq!(&p[..8], &[1, 5, 100, 0, 1, 0x00, 0xAE, 0xC7]);
+        // Byte 9 is the enable flag — firmware rejects the packet without it.
+        assert_eq!(p[9], 1);
         // brightness over 100 and direction out of range are clamped, not wrapped.
         let p = effect_payload(Effect::Static, 0, 250, 9, Rgb(0, 0, 0));
         assert_eq!(p[2], 100);
