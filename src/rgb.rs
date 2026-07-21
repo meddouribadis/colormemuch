@@ -268,18 +268,58 @@ fn report_path(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(name)
 }
 
+/// One write in a decode matrix: which method, what payload shape, and how
+/// long to hold before the next shot (so the eye can catch what changed).
+pub struct Shot {
+    pub label: String,
+    pub method: String,
+    pub payload: Payload,
+    pub pause_ms: u64,
+}
+
+/// The interface's two parameter shapes, so one matrix can mix byte-array and
+/// packed-u64 methods in a single elevated session.
+pub enum Payload {
+    Bytes(Vec<u8>),
+    Packed(u64),
+}
+
+/// Pack a per-zone colour for `SetGamingRgbKb` (the `UInt64` method).
+///
+/// Grounded in CYPHER's own probe, not prior art alone: `GetGamingRgbKb`
+/// answered exactly selectors 1, 2, 4, 8 — the zone bitmask — and returned
+/// `0x00000000_C7AE0000` while the firmware's template colour is
+/// (R,G,B) = (00, AE, C7). That is the Linux per-zone struct `[zone, R, G, B]`
+/// packed little-endian: `zone | R<<8 | G<<16 | B<<24` (the getter zeroes the
+/// zone echo in the low byte).
+pub fn rgbkb_packed(zone_bit: u8, c: Rgb) -> u64 {
+    (zone_bit as u64) | ((c.0 as u64) << 8) | ((c.1 as u64) << 16) | ((c.2 as u64) << 24)
+}
+
+/// Pack `SetGamingLEDColor` the way its own getter echoes state.
+///
+/// `GetGamingLEDColor[1]` returned `0x0000_0564_C7AE_0000`, which decomposes as
+/// speed(5)<<40 | brightness(0x64)<<32 | B(C7)<<24 | G(AE)<<16 | R(00)<<8 —
+/// the same colour/brightness/speed values the 15-byte KB descriptor carries.
+/// Selector goes in the low byte.
+pub fn ledcolor_packed(selector: u8, c: Rgb, brightness: u8, speed: u8) -> u64 {
+    (selector as u64)
+        | ((c.0 as u64) << 8)
+        | ((c.1 as u64) << 16)
+        | ((c.2 as u64) << 24)
+        | ((brightness.min(100) as u64) << 32)
+        | ((speed as u64) << 40)
+}
+
 /// Fire a whole matrix of candidate payloads in ONE elevated session, logging
 /// every `gmOutput` to a single report.
 ///
 /// This exists because the firmware answers a malformed packet with a status
-/// word (e.g. `gmOutput=0x1`) rather than a COM error — so the *accepted*
-/// packet is identifiable by its return code without a separate UAC prompt per
-/// guess. A delay between shots lets the eye catch which one visibly lands; the
-/// return-code column is the primary signal, the eye is the tiebreak.
-///
-/// Each shot is `(label, method, payload)`. Keyboard-only surfaces here; all
-/// are reversible via PredatorSense.
-pub fn fire_matrix_and_report(shots: &[(String, String, Vec<u8>)]) -> std::path::PathBuf {
+/// word (`0x0` accepted, `0x1` rejected) rather than a COM error — so the
+/// *accepted* packet is identifiable by its return code without a separate UAC
+/// prompt per guess. Pauses between shots let the eye catch which one visibly
+/// lands; the return-code column is the primary signal, the eye the tiebreak.
+pub fn fire_matrix_and_report(shots: &[Shot]) -> std::path::PathBuf {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     let ts = SystemTime::now()
@@ -290,26 +330,41 @@ pub fn fire_matrix_and_report(shots: &[(String, String, Vec<u8>)]) -> std::path:
 
     let mut out = String::new();
     out.push_str(&format!("colormemuch write matrix — epoch {ts}\n"));
-    out.push_str(&format!("{} shots, ~3s apart. gmOutput is the key column:\n", shots.len()));
-    out.push_str("a code that differs from the known-rejected 0x1 is the one to trust.\n\n");
+    out.push_str(&format!(
+        "{} shots. gmOutput: 0x0 = accepted, 0x1 = rejected.\n\n",
+        shots.len()
+    ));
 
     match Wmi::connect() {
         Ok(wmi) => {
-            for (i, (label, method, payload)) in shots.iter().enumerate() {
-                let hex = payload
-                    .iter()
-                    .map(|b| format!("{b:02X}"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                out.push_str(&format!("[{i}] t+{}s  {label}\n", i * 3));
-                out.push_str(&format!("    {method} <- [{hex}] ({} bytes)\n", payload.len()));
-                match wmi.call_bytes(method, payload) {
+            for (i, shot) in shots.iter().enumerate() {
+                out.push_str(&format!("[{i}] {}\n", shot.label));
+                let result = match &shot.payload {
+                    Payload::Bytes(b) => {
+                        let hex = b
+                            .iter()
+                            .map(|x| format!("{x:02X}"))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        out.push_str(&format!(
+                            "    {} <- [{hex}] ({} bytes)\n",
+                            shot.method,
+                            b.len()
+                        ));
+                        wmi.call_bytes(&shot.method, b)
+                    }
+                    Payload::Packed(v) => {
+                        out.push_str(&format!("    {} <- 0x{v:016X}\n", shot.method));
+                        wmi.call_packed(&shot.method, *v)
+                    }
+                };
+                match result {
                     Ok(status) => out.push_str(&format!("    gmOutput = 0x{status:X}\n\n")),
                     Err(e) => out.push_str(&format!("    ERROR: {e}\n\n")),
                 }
-                std::thread::sleep(Duration::from_secs(3));
+                std::thread::sleep(Duration::from_millis(shot.pause_ms));
             }
-            out.push_str("done — note WHICH step (if any) turned the keyboard green and whether it stuck.\n");
+            out.push_str("done.\n");
         }
         Err(e) => out.push_str(&format!("CONNECT FAILED  {e}\n(elevated?)\n")),
     }
@@ -321,6 +376,24 @@ pub fn fire_matrix_and_report(shots: &[(String, String, Vec<u8>)]) -> std::path:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn shot(label: &str, method: &str, payload: Payload, pause_ms: u64) -> Shot {
+        Shot {
+            label: label.to_string(),
+            method: method.to_string(),
+            payload,
+            pause_ms,
+        }
+    }
+
+    #[test]
+    fn packed_layouts_match_probe_echoes() {
+        // These constants are CYPHER's actual getter echoes — the packers must
+        // reproduce them from the decomposed values or the layout is wrong.
+        assert_eq!(rgbkb_packed(0, Rgb(0x00, 0xAE, 0xC7)), 0xC7AE0000);
+        assert_eq!(rgbkb_packed(1, Rgb(0x00, 0xAE, 0xC7)), 0xC7AE0001);
+        assert_eq!(ledcolor_packed(0, Rgb(0x00, 0xAE, 0xC7), 0x64, 5), 0x0000_0564_C7AE_0000);
+    }
 
     #[test]
     fn static_payload_layout() {
@@ -384,12 +457,12 @@ mod tests {
         // The other documented shape entirely: 4-byte per-zone static, all zones.
         let static4 = static_zone_payload(ALL_ZONES, green).to_vec();
 
-        let m = "SetGamingKBBacklight".to_string();
+        let m = "SetGamingKBBacklight";
         let shots = vec![
-            ("baseline breath (8=0,9=0) — expect 0x1".to_string(), m.clone(), baseline),
-            ("nekro-sense breath (8=3,9=1)".to_string(), m.clone(), nekro),
-            ("enable-only breath (9=1)".to_string(), m.clone(), enable_only),
-            ("static 4-byte all-zones green".to_string(), m.clone(), static4),
+            shot("baseline breath (8=0,9=0) — expect 0x1", m, Payload::Bytes(baseline), 3000),
+            shot("nekro-sense breath (8=3,9=1)", m, Payload::Bytes(nekro), 3000),
+            shot("enable-only breath (9=1)", m, Payload::Bytes(enable_only), 3000),
+            shot("static 4-byte all-zones green", m, Payload::Bytes(static4), 3000),
         ];
 
         let path = fire_matrix_and_report(&shots);
@@ -412,13 +485,77 @@ mod tests {
     #[test]
     #[ignore = "writes real hardware; run explicitly and elevated"]
     fn hw_confirm_effect() {
-        let m = "SetGamingKBBacklight".to_string();
-        let breath = |color| effect_payload(Effect::Breath, 4, 100, 1, color).to_vec();
+        let m = "SetGamingKBBacklight";
+        let breath = |color| Payload::Bytes(effect_payload(Effect::Breath, 4, 100, 1, color).to_vec());
         let shots = vec![
-            ("confirm RED".to_string(), m.clone(), breath(Rgb(0xFF, 0x00, 0x00))),
-            ("confirm GREEN".to_string(), m.clone(), breath(Rgb(0x00, 0xFF, 0x00))),
-            ("confirm BLUE".to_string(), m.clone(), breath(Rgb(0x00, 0x00, 0xFF))),
+            shot("confirm RED", m, breath(Rgb(0xFF, 0x00, 0x00)), 3000),
+            shot("confirm GREEN", m, breath(Rgb(0x00, 0xFF, 0x00)), 3000),
+            shot("confirm BLUE", m, breath(Rgb(0x00, 0x00, 0xFF)), 3000),
         ];
+        let path = fire_matrix_and_report(&shots);
+        eprintln!("report written: {}", path.display());
+    }
+
+    /// THE DECISIVE RUN — tests the two methods we have NOT tried yet, with
+    /// packings derived from this machine's own getter echoes.
+    ///
+    /// `SetGamingKBBacklight` accepts our packets (0x0) but nothing shows, so
+    /// it is probably the *effect/mode* register, not the colour register.
+    /// The colour candidates, both untouched until now:
+    ///
+    /// 1. `SetGamingRgbKb` — per-zone, `zone | R<<8 | G<<16 | B<<24`
+    ///    (probe: getter answers exactly selectors 1/2/4/8 = zone bits).
+    /// 2. `SetGamingLEDColor` — `sel | R<<8 | G<<16 | B<<24 | bright<<32 |
+    ///    speed<<40` (probe: getter echo 0x0564C7AE0000 decomposes exactly so).
+    ///
+    /// Walks all four zones red → green → blue via (1), then tries (2).
+    /// Reversible via PredatorSense.
+    #[test]
+    #[ignore = "writes real hardware; run explicitly and elevated"]
+    fn hw_rgbkb_walk() {
+        let mut shots = Vec::new();
+
+        // Put the keyboard in static mode first so per-zone colours can show.
+        shots.push(shot(
+            "enter static mode (KBBacklight mode=0, enable)",
+            "SetGamingKBBacklight",
+            Payload::Bytes(effect_payload(Effect::Static, 0, 100, 1, Rgb(0xFF, 0, 0)).to_vec()),
+            1000,
+        ));
+
+        // Hypothesis 1: SetGamingRgbKb is the per-zone colour register.
+        for (name, c) in [
+            ("RED", Rgb(0xFF, 0x00, 0x00)),
+            ("GREEN", Rgb(0x00, 0xFF, 0x00)),
+            ("BLUE", Rgb(0x00, 0x00, 0xFF)),
+        ] {
+            for z in [1u8, 2, 4, 8] {
+                shots.push(shot(
+                    &format!("RgbKb zone 0x{z:X} {name}"),
+                    "SetGamingRgbKb",
+                    Payload::Packed(rgbkb_packed(z, c)),
+                    if z == 8 { 3000 } else { 150 },
+                ));
+            }
+        }
+
+        // Hypothesis 2: the LEDColor/Behavior pair. Behavior first (getter
+        // echo for sel 1 was 0x100 → sel | behavior<<8), then colour.
+        shots.push(shot(
+            "LEDBehavior sel1 behavior1",
+            "SetGamingLEDBehavior",
+            Payload::Packed(0x101),
+            500,
+        ));
+        for (name, c) in [("RED", Rgb(0xFF, 0x00, 0x00)), ("GREEN", Rgb(0x00, 0xFF, 0x00))] {
+            shots.push(shot(
+                &format!("LEDColor sel1 {name}"),
+                "SetGamingLEDColor",
+                Payload::Packed(ledcolor_packed(1, c, 100, 0)),
+                3000,
+            ));
+        }
+
         let path = fire_matrix_and_report(&shots);
         eprintln!("report written: {}", path.display());
     }
