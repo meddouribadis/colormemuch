@@ -233,18 +233,25 @@ impl RgbControl {
             }
         };
 
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.heading(short_name(&name));
-            ui.label(RichText::new(format!("· clock {t:6.2}s")).weak().monospace());
+            ui.label(
+                RichText::new(format!("· {} zones · clock {t:6.2}s", sources.len()))
+                    .weak()
+                    .monospace(),
+            );
         });
         ui.separator();
+        ui.add_space(8.0);
 
         let groups = shared_clock_groups(&sources);
 
-        // Per-zone control panels, side by side.
+        // Per-zone control panels, side by side; wrap to the next line if the
+        // window is too narrow to hold them all.
         let n = sources.len();
         egui::ScrollArea::horizontal().show(ui, |ui| {
-            ui.horizontal_top(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 for zi in 0..n {
                     self.zone_panel(ui, zi, frame.get(zi).copied().unwrap_or(Rgb(0, 0, 0)), &groups);
                 }
@@ -288,53 +295,80 @@ impl RgbControl {
         preview: Rgb,
         groups: &[(Effect, Vec<usize>)],
     ) {
+        const W: f32 = 172.0;
+
         // Which shared-clock group (if any) this zone belongs to.
         let group_effect = groups
             .iter()
             .find(|(_, idxs)| idxs.contains(&zi))
             .map(|(e, _)| *e);
 
-        egui::Frame::group(ui.style())
+        let mut frame = egui::Frame::group(ui.style())
             .fill(ui.visuals().faint_bg_color)
-            .show(ui, |ui| {
-                ui.set_width(150.0);
+            .rounding(6.0)
+            .inner_margin(egui::Margin::same(8.0));
+        if let Some(e) = group_effect {
+            // A hue-tinted border ties ganged panels together at a glance.
+            frame = frame.stroke(egui::Stroke::new(1.5_f32, effect_hue(e)));
+        }
 
-                // Preview header: the zone's live color, plus a link badge.
+        frame.show(ui, |ui| {
+            // Force a vertical stack — a Frame inherits the parent's (here
+            // horizontal) layout otherwise, which flings the controls sideways.
+            ui.vertical(|ui| {
+                ui.set_width(W);
+                ui.spacing_mut().slider_width = W - 64.0;
+
+                // Live preview header.
                 let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(150.0, 34.0), egui::Sense::hover());
-                ui.painter().rect_filled(
-                    rect,
-                    4.0,
-                    Color32::from_rgb(preview.0, preview.1, preview.2),
-                );
+                    ui.allocate_exact_size(egui::vec2(W, 44.0), egui::Sense::hover());
+                let pv = Color32::from_rgb(preview.0, preview.1, preview.2);
+                ui.painter().rect_filled(rect, 5.0, pv);
+                // Text color adapts to the preview's luminance so it stays legible.
+                let ink = if luminance(preview) > 0.55 {
+                    Color32::from_black_alpha(200)
+                } else {
+                    Color32::from_white_alpha(220)
+                };
                 ui.painter().text(
-                    rect.left_top() + egui::vec2(6.0, 4.0),
+                    rect.left_top() + egui::vec2(8.0, 6.0),
                     egui::Align2::LEFT_TOP,
                     format!("Zone {}", zi + 1),
-                    egui::FontId::proportional(12.0),
-                    Color32::from_black_alpha(180),
+                    egui::FontId::proportional(13.0),
+                    ink,
                 );
                 if let Some(e) = group_effect {
-                    // Link badge: a small dot in the effect's hue, top-right.
-                    ui.painter()
-                        .circle_filled(rect.right_top() + egui::vec2(-9.0, 9.0), 5.0, effect_hue(e));
+                    ui.painter().text(
+                        rect.left_bottom() + egui::vec2(8.0, -6.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        format!("🔗 {}", e.label()),
+                        egui::FontId::proportional(11.0),
+                        ink,
+                    );
+                    ui.painter().circle_filled(
+                        rect.right_top() + egui::vec2(-10.0, 10.0),
+                        5.0,
+                        effect_hue(e),
+                    );
                 }
+
+                ui.add_space(8.0);
 
                 let Conn::Ready { zones, .. } = &mut self.conn else {
                     return;
                 };
                 let z = &mut zones[self.selected][zi];
 
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    if ui
-                        .selectable_label(z.source == Source::Solid, "Solid")
+                // Source toggle — full-width segmented pair.
+                ui.columns(2, |cols| {
+                    if cols[0]
+                        .selectable_label(z.source == Source::Solid, "  Solid  ")
                         .clicked()
                     {
                         z.source = Source::Solid;
                         self.dirty = true;
                     }
-                    if ui
+                    if cols[1]
                         .selectable_label(z.source == Source::Function, "Function")
                         .clicked()
                     {
@@ -343,34 +377,39 @@ impl RgbControl {
                     }
                 });
 
+                ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    ui.label("Color");
+                    ui.label(RichText::new("Color").weak());
                     if ui.color_edit_button_srgb(&mut z.color).changed() {
                         self.dirty = true;
                     }
                 });
 
                 if z.source == Source::Function {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("Effect").weak().small());
                     egui::ComboBox::from_id_source(("effect", self.selected, zi))
+                        .width(W)
                         .selected_text(z.effect.label())
                         .show_ui(ui, |ui| {
                             for e in Effect::ALL {
-                                if ui
-                                    .selectable_value(&mut z.effect, e, e.label())
-                                    .clicked()
-                                {
+                                if ui.selectable_value(&mut z.effect, e, e.label()).clicked() {
                                     self.dirty = true;
                                 }
                             }
                         });
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Speed").weak().small());
                     if ui
-                        .add(egui::Slider::new(&mut z.speed, 1..=9).text("spd"))
+                        .add(egui::Slider::new(&mut z.speed, 1..=9))
                         .changed()
                     {
                         self.dirty = true;
                     }
                 }
 
+                ui.add_space(4.0);
+                ui.label(RichText::new("Brightness").weak().small());
                 if ui
                     .add(egui::Slider::new(&mut z.brightness, 0..=100).suffix("%"))
                     .changed()
@@ -378,6 +417,8 @@ impl RgbControl {
                     self.dirty = true;
                 }
             });
+        });
+        ui.add_space(8.0);
     }
 
     /// Returns whether anything is animating (needs continuous repaint).
@@ -439,6 +480,11 @@ fn short_name(name: &str) -> String {
         .replace("ModeKeyLED", "Mode Key")
         .trim()
         .to_string()
+}
+
+/// Perceptual-ish luminance in 0..=1, for picking legible text over a swatch.
+fn luminance(c: Rgb) -> f32 {
+    (0.299 * c.0 as f32 + 0.587 * c.1 as f32 + 0.114 * c.2 as f32) / 255.0
 }
 
 /// Per-effect hue for the shared-clock badges (matches the mockup tokens).
