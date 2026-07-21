@@ -1,0 +1,76 @@
+colormemuch WMI activity trace - epoch 1784578661, 45 s window
+Filter: operations mentioning Acer / GamingFunction / GenericMethod, plus their caller PIDs.
+
+20:18:23.562  [caller: AcerHardwareService (pid 24940)]
+  CorrelationId = {00000000-0000-0000-0000-000000000000}; GroupOperationId = 25509; OperationId = 25510; Operation = Start IWbemServices::ExecQuery - ROOT\WMI : SELECT * FROM AcerGamingFunction; ClientMachine = CYPHER; User = NT AUTHORITY\SYSTEM; ClientProcessId = 24940; NamespaceName = 134290198145303933
+
+20:18:23.563
+  ProviderInfo for GroupOperationId = 25509; Operation = Provider::CreateInstanceEnum - WMIProv : AcerGamingFunction; HostID = 7824; ProviderName = WMIProv; ProviderGuid = {D2D588B5-D081-11d0-99E0-00C04FC2F8EC}; Path = %systemroot%\system32\wbem\wmiprov.dll
+
+20:18:23.578  [caller: AcerHardwareService (pid 24940)]
+  CorrelationId = {00000000-0000-0000-0000-000000000000}; GroupOperationId = 25509; OperationId = 25512; Operation = Start IWbemServices::ExecMethod - ROOT\WMI : AcerGamingFunction.InstanceName="ACPI\\PNP0C14\\APGe_0"::GetGamingSysInfo; ClientMachine = CYPHER; User = NT AUTHORITY\SYSTEM; ClientProcessId = 24940; NamespaceName = 134290198145303933
+
+20:18:23.579
+  ProviderInfo for GroupOperationId = 25509; Operation = Provider::GetObject - WMIProv : AcerGamingFunction.InstanceName="ACPI\\PNP0C14\\APGe_0"; HostID = 7824; ProviderName = WMIProv; ProviderGuid = {D2D588B5-D081-11d0-99E0-00C04FC2F8EC}; Path = %systemroot%\system32\wbem\wmiprov.dll
+
+20:18:23.580  [caller: AcerHardwareService (pid 24940)]
+  CorrelationId = {00000000-0000-0000-0000-000000000000}; GroupOperationId = 25509; OperationId = 25508; ClassName= AcerGamingFunction; MethodName = GetGamingSysInfo; ImplementationClass = AcerGamingFunction; ClientMachine = CYPHER; User = NT AUTHORITY\SYSTEM; ClientProcessId = 24940; NamespaceName = \\.\ROOT\WMI
+
+20:18:23.580
+  ProviderInfo for GroupOperationId = 25509; Operation = Provider::ExecMethod - WMIProv : AcerGamingFunction.InstanceName="ACPI\\PNP0C14\\APGe_0"::GetGamingSysInfo; HostID = 7824; ProviderName = WMIProv; ProviderGuid = {D2D588B5-D081-11d0-99E0-00C04FC2F8EC}; Path = %systemroot%\system32\wbem\wmiprov.dll
+
+20:18:23.618  [caller: AcerHardwareService (pid 24940)]
+  CorrelationId = {00000000-0000-0000-0000-000000000000}; GroupOperationId = 25515; OperationId = 25516; Operation = Start IWbemServices::ExecQuery - ROOT\WMI : SELECT * FROM AcerGamingFunction; ClientMachine = CYPHER; User = NT AUTHORITY\SYSTEM; ClientProcessId = 24940; NamespaceName = 134290198145303933
+
+20:18:23.619
+  ProviderInfo for GroupOperationId = 25515; Operation = Provider::CreateInstanceEnum - WMIProv : AcerGamingFunction; HostID = 7824; ProviderName = WMIProv; ProviderGuid = {D2D588B5-D081-11d0-99E0-00C04FC2F8EC}; Path = %systemroot%\system32\wbem\wmiprov.dll
+
+20:18:23.621  [caller: AcerHardwareService (pid 24940)]
+  CorrelationId = {00000000-0000-0000-0000-000000000000}; GroupOperationId = 25515; OperationId = 25518; Operation = Start IWbemServices::ExecMethod - ROOT\WMI : AcerGamingFunction.InstanceName="ACPI\\PNP0C14\\APGe_0"::SetGamingFanBehavior; ClientMachine = CYPHER; User = NT AUTHORITY\SYSTEM; ClientProcessId = 24940; NamespaceName = 134290198145303933
+
+20:18:23.621
+  ProviderInfo for GroupOperationId = 25515; Operation = Provider::GetObject - WMIProv : AcerGamingFunction.InstanceName="ACPI\\PNP0C14\\APGe_0"; HostID = 7824; ProviderName = WMIProv; ProviderGuid = {D2D588B5-D081-11d0-99E0-00C04FC2F8EC}; Path = %systemroot%\system32\wbem\wmiprov.dll
+
+20:18:23.622  [caller: AcerHardwareService (pid 24940)]
+  CorrelationId = {00000000-0000-0000-0000-000000000000}; GroupOperationId = 25515; OperationId = 25514; ClassName= AcerGamingFunction; MethodName = SetGamingFanBehavior; ImplementationClass = AcerGamingFunction; ClientMachine = CYPHER; User = NT AUTHORITY\SYSTEM; ClientProcessId = 24940; NamespaceName = \\.\ROOT\WMI
+
+20:18:23.622
+  ProviderInfo for GroupOperationId = 25515; Operation = Provider::ExecMethod - WMIProv : AcerGamingFunction.InstanceName="ACPI\\PNP0C14\\APGe_0"::SetGamingFanBehavior; HostID = 7824; ProviderName = WMIProv; ProviderGuid = {D2D588B5-D081-11d0-99E0-00C04FC2F8EC}; Path = %systemroot%\system32\wbem\wmiprov.dll
+
+20:18:23.808  [caller: AcerHardwareService (pid 24940)]
+  CorrelationId = {00000000-0000-0000-0000-000000000000}; GroupOperationId = 25521; OperationId = 25522; Operation = Start IWbemServices::ExecQuery - ROOT\WMI : SELECT * FROM AcerGamingFunction; ClientMachine = CYPHER; User = NT AUTHORITY\SYSTEM; ClientProcessId = 24940; NamespaceName = 134290198145303933
+
+20:18:23.809
+  ProviderInfo for GroupOperationId = 25521; Operation = Provider::CreateInstanceEnum - WMIProv : AcerGamingFunction; HostID = 7824; ProviderName = WMIProv; ProviderGuid = {D2D588B5-D081-11d0-99E0-00C04FC2F8EC}; Path = %systemroot%\system32\wbem\wmiprov.dll
+
+20:18:23.810  [caller: AcerHardwareService (pid 24940)]
+  CorrelationId = {00000000-0000-0000-0000-000000000000}; GroupOperationId = 25521; OperationId = 25524; Operation = Start IWbemServices::ExecMethod - ROOT\WMI : AcerGamingFunction.InstanceName="ACPI\\PNP0C14\\APGe_0"::GetGamingSysInfo; ClientMachine = CYPHER; User = NT AUTHORITY\SYSTEM; ClientProcessId = 24940; NamespaceName = 134290198145303933
+
+20:18:23.811
+  ProviderInfo for GroupOperationId = 25521; Operation = Provider::GetObject - WMIProv : AcerGamingFunction.InstanceName="ACPI\\PNP0C14\\APGe_0"; HostID = 7824; ProviderName = WMIProv; ProviderGuid = {D2D588B5-D081-11d0-99E0-00C04FC2F8EC}; Path = %systemroot%\system32\wbem\wmiprov.dll
+
+20:18:23.811  [caller: AcerHardwareService (pid 24940)]
+  CorrelationId = {00000000-0000-0000-0000-000000000000}; GroupOperationId = 25521; OperationId = 25520; ClassName= AcerGamingFunction; MethodName = GetGamingSysInfo; ImplementationClass = AcerGamingFunction; ClientMachine = CYPHER; User = NT AUTHORITY\SYSTEM; ClientProcessId = 24940; NamespaceName = \\.\ROOT\WMI
+
+20:18:23.811
+  ProviderInfo for GroupOperationId = 25521; Operation = Provider::ExecMethod - WMIProv : AcerGamingFunction.InstanceName="ACPI\\PNP0C14\\APGe_0"::GetGamingSysInfo; HostID = 7824; ProviderName = WMIProv; ProviderGuid = {D2D588B5-D081-11d0-99E0-00C04FC2F8EC}; Path = %systemroot%\system32\wbem\wmiprov.dll
+
+20:18:23.856  [caller: AcerHardwareService (pid 24940)]
+  CorrelationId = {00000000-0000-0000-0000-000000000000}; GroupOperationId = 25527; OperationId = 25528; Operation = Start IWbemServices::ExecQuery - ROOT\WMI : SELECT * FROM AcerGamingFunction; ClientMachine = CYPHER; User = NT AUTHORITY\SYSTEM; ClientProcessId = 24940; NamespaceName = 134290198145303933
+
+20:18:23.857
+  ProviderInfo for GroupOperationId = 25527; Operation = Provider::CreateInstanceEnum - WMIProv : AcerGamingFunction; HostID = 7824; ProviderName = WMIProv; ProviderGuid = {D2D588B5-D081-11d0-99E0-00C04FC2F8EC}; Path = %systemroot%\system32\wbem\wmiprov.dll
+
+20:18:23.858  [caller: AcerHardwareService (pid 24940)]
+  CorrelationId = {00000000-0000-0000-0000-000000000000}; GroupOperationId = 25527; OperationId = 25530; Operation = Start IWbemServices::ExecMethod - ROOT\WMI : AcerGamingFunction.InstanceName="ACPI\\PNP0C14\\APGe_0"::SetGamingFanBehavior; ClientMachine = CYPHER; User = NT AUTHORITY\SYSTEM; ClientProcessId = 24940; NamespaceName = 134290198145303933
+
+20:18:23.858
+  ProviderInfo for GroupOperationId = 25527; Operation = Provider::GetObject - WMIProv : AcerGamingFunction.InstanceName="ACPI\\PNP0C14\\APGe_0"; HostID = 7824; ProviderName = WMIProv; ProviderGuid = {D2D588B5-D081-11d0-99E0-00C04FC2F8EC}; Path = %systemroot%\system32\wbem\wmiprov.dll
+
+20:18:23.859  [caller: AcerHardwareService (pid 24940)]
+  CorrelationId = {00000000-0000-0000-0000-000000000000}; GroupOperationId = 25527; OperationId = 25526; ClassName= AcerGamingFunction; MethodName = SetGamingFanBehavior; ImplementationClass = AcerGamingFunction; ClientMachine = CYPHER; User = NT AUTHORITY\SYSTEM; ClientProcessId = 24940; NamespaceName = \\.\ROOT\WMI
+
+20:18:23.859
+  ProviderInfo for GroupOperationId = 25527; Operation = Provider::ExecMethod - WMIProv : AcerGamingFunction.InstanceName="ACPI\\PNP0C14\\APGe_0"::SetGamingFanBehavior; HostID = 7824; ProviderName = WMIProv; ProviderGuid = {D2D588B5-D081-11d0-99E0-00C04FC2F8EC}; Path = %systemroot%\system32\wbem\wmiprov.dll
+
+(139 trace events total, 24 Acer-related)
