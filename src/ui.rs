@@ -21,8 +21,11 @@ use crate::effects::{render_plan, scale, shared_clock_groups, Effect, Params, Zo
 use crate::openrgb::{Controller, OpenRgb};
 use crate::rgb::Rgb;
 
-/// How often we push frames to the hardware while animating.
-const PUSH_HZ: f32 = 30.0;
+/// How often we push frames to the hardware / repaint while animating. These
+/// effects live on 4 zones of slow color motion, so 20 is visually identical to
+/// 30 at meaningfully less CPU. Static changes still apply instantly (they don't
+/// wait for a tick).
+const PUSH_HZ: f32 = 20.0;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Source {
@@ -77,6 +80,12 @@ enum Conn {
         controllers: Vec<Controller>,
         /// Parallel to `controllers`; one Vec of zones per controller.
         zones: Vec<Vec<ZoneUi>>,
+        /// Whether each controller has been switched into Direct mode yet —
+        /// so we send SET_CUSTOM_MODE once, not every frame.
+        direct_set: Vec<bool>,
+        /// Last frame pushed per controller; a device is only re-sent when its
+        /// frame actually changes, so static devices go quiet.
+        last_frame: Vec<Vec<Rgb>>,
     },
     Failed(String),
 }
@@ -134,14 +143,17 @@ impl RgbControl {
                 self.rx = None;
                 self.conn = match res {
                     Ok((client, controllers)) => {
-                        let zones = controllers
+                        let zones: Vec<Vec<ZoneUi>> = controllers
                             .iter()
                             .map(|c| vec![ZoneUi::default(); c.led_count as usize])
                             .collect();
+                        let n = controllers.len();
                         Conn::Ready {
                             client,
                             controllers,
                             zones,
+                            direct_set: vec![false; n],
+                            last_frame: vec![Vec::new(); n],
                         }
                     }
                     Err(e) => Conn::Failed(e),
@@ -422,11 +434,18 @@ impl RgbControl {
     }
 
     /// Returns whether anything is animating (needs continuous repaint).
+    ///
+    /// Cheap by construction: we only run at `PUSH_HZ` (or immediately on a user
+    /// change), each device enters Direct mode once, and a device is written
+    /// ONLY when its rendered frame differs from the last one pushed — so static
+    /// zones send nothing and idle devices stay silent.
     fn push_if_due(&mut self, t: f32) -> bool {
         let Conn::Ready {
             client,
             controllers,
             zones,
+            direct_set,
+            last_frame,
         } = &mut self.conn
         else {
             return false;
@@ -438,7 +457,8 @@ impl RgbControl {
             .any(|z| z.source == Source::Function);
 
         let due = self.last_push.elapsed().as_secs_f32() >= 1.0 / PUSH_HZ;
-        if !(animating && due) && !self.dirty {
+        // Nothing to do: not time for an animation tick and no pending edit.
+        if !due && !self.dirty {
             return animating;
         }
 
@@ -449,7 +469,18 @@ impl RgbControl {
             for c in &mut frame {
                 *c = scale(*c, m);
             }
-            let _ = client.set_leds(ctrl, &frame);
+            // Skip devices whose output hasn't moved since last push.
+            if frame == last_frame[ci] {
+                continue;
+            }
+            if !direct_set[ci] {
+                if client.enter_direct(ctrl).is_ok() {
+                    direct_set[ci] = true;
+                }
+            }
+            if client.update_leds(ctrl, &frame).is_ok() {
+                last_frame[ci] = frame;
+            }
         }
         self.last_push = Instant::now();
         self.dirty = false;

@@ -229,14 +229,18 @@ impl OpenRgb {
         self.set_leds(ctrl, &frame)
     }
 
-    /// Set each LED individually — for the keyboard this is per-zone color
-    /// (4 LEDs = 4 zones). Switches to Direct/Custom mode first so the colors
-    /// persist instead of being overridden by an active effect. If `colors` is
-    /// shorter than the LED count the last color is repeated; longer is
-    /// truncated.
-    pub fn set_leds(&mut self, ctrl: &Controller, colors: &[Rgb]) -> io::Result<()> {
-        self.send(ctrl.index, SET_CUSTOM_MODE, &[])?;
+    /// Switch a controller into Direct/Custom mode. Do this ONCE before a run
+    /// of [`update_leds`](Self::update_leds) frames — repeating it every frame
+    /// makes the server re-init the device and pins the CPU.
+    pub fn enter_direct(&mut self, ctrl: &Controller) -> io::Result<()> {
+        self.send(ctrl.index, SET_CUSTOM_MODE, &[])
+    }
 
+    /// Push LED colors WITHOUT re-setting the mode — the hot path for
+    /// animation. Assumes the controller is already in Direct mode
+    /// (call [`enter_direct`](Self::enter_direct) first). If `colors` is shorter
+    /// than the LED count the last color repeats; longer is truncated.
+    pub fn update_leds(&mut self, ctrl: &Controller, colors: &[Rgb]) -> io::Result<()> {
         let n = ctrl.led_count as usize;
         let fallback = colors.last().copied().unwrap_or(Rgb(0, 0, 0));
 
@@ -251,6 +255,14 @@ impl OpenRgb {
         payload.extend_from_slice(&((inner.len() + 4) as u32).to_le_bytes());
         payload.extend_from_slice(&inner);
         self.send(ctrl.index, UPDATE_LEDS, &payload)
+    }
+
+    /// One-shot: enter Direct mode and set the colors. Convenient for a single
+    /// static set; do NOT call this in an animation loop — use `enter_direct`
+    /// once then `update_leds` per frame.
+    pub fn set_leds(&mut self, ctrl: &Controller, colors: &[Rgb]) -> io::Result<()> {
+        self.enter_direct(ctrl)?;
+        self.update_leds(ctrl, colors)
     }
 
     /// Set the LEDs of a single zone. `zone` indexes into `ctrl.zones`.
