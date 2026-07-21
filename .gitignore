@@ -6,3 +6,6 @@
 # baselines (probe-*.txt) are committed on purpose; these are throwaway results
 # meant to be pasted back, not versioned.
 kbwrite-*.txt
+
+# Transient RE capture outputs (WMI traces, OpenRGB dumps). Keep the scripts, not the noise.
+wmitrace-*.txt
