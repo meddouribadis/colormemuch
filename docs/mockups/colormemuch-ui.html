@@ -28,45 +28,81 @@
                          panel inner margin 10px; grid row gap 6px
   font                   egui default is a clean sans (Ubuntu-ish);
                          monospace (#c4c4c8) used for numeric values.
+  per-effect link hues   Comet #1fb7a6 · Fire #ff9500 · Rainbow #d84bff
+                         · Breathe #5e5ce6 · Wave #34c0ff · Police #ff3b4e
+                         · Gradient #4bbf73  (used for a zone's link badge +
+                         shared-clock bracket; hue == the shared effect)
 
   EGUI REGION -> WIDGET MAPPING
   -------------------------------------------------------------------
-  Menu bar (File/View/Help) ...... egui::menu::bar in a TopBottomPanel::top,
+  Menu bar (File/View/Help) ...... egui::menu::bar in TopBottomPanel::top;
                                     each menu = ui.menu_button(...).
   Left device list ............... SidePanel::left; each device row is a
-                                    SelectableLabel inside a horizontal
-                                    layout with a custom-painted swatch
+                                    SelectableLabel + custom-painted swatch
                                     (Painter::rect_filled) + label text.
-  Master brightness (left btm) ... Slider::new(..).range(0..=100)
-                                    .suffix("%") pinned under a Separator.
-  Central editor header .......... Heading label + a small painted swatch.
-  4-zone keyboard preview ........ CentralPanel custom Painter: 4 rounded
-                                    rects (rect_filled + rect_stroke for the
-                                    selected zone) laid out in a horizontal
-                                    allocate_exact_size response; click hit-
-                                    test selects the zone.
-  Zone color picker .............. color_edit_button_srgb(&mut [u8;3]) per
-                                    zone, shown in an egui::Grid; disabled
-                                    (add_enabled=false) unless mode is
-                                    Direct/Static.
-  Mode selector .................. ComboBox::from_label("Mode") OR a wrap
-                                    of SelectableLabels; capability-driven.
-  Speed / Brightness sliders ..... Slider range 1..=9 (kbd) / 1..=5 (logo)
-                                    + 0..=100 suffix "%"; shown via
-                                    ui.add_enabled_ui / conditional add so
-                                    they appear/hide with mode capability.
-  Custom Effects gallery ......... ScrollArea::horizontal over a row of
-                                    grouped "cards"; each card = a Frame
-                                    (faint bg, rounding 6) with a painted
-                                    thumbnail + label + a Play/Stop Button
-                                    and a small speed Slider/DragValue.
-  Status line (bottom) ........... TopBottomPanel::bottom with a painted
-                                    status dot + weak-text label.
-  Light variant note ............. swap window #1b1b1b->#f4f4f5,
-                                    panel #242424->#e8e8ea, text strong
-                                    #e8e8ea->#1b1b1b, extreme #101013->#fff,
-                                    keep accent #1fb7a6 (darken hover to
-                                    #159a8b for contrast on light rails).
+                                    Keyboard selected -> 4 zone panels;
+                                    Cover Logo / Mode-Key -> ONE panel each
+                                    (single LED, capability-limited picker).
+  Master brightness (left btm) ... Slider::new(..).range(0..=100).suffix("%")
+                                    under a Separator, pinned bottom.
+
+  --- PER-ZONE CONTROL PANEL (the core of this screen) -------------
+  The old read-only strip is gone. Each zone is a self-contained stack
+  laid out with a horizontal ui + 4 equal child uis (or egui::Grid,
+  columns=4). Each child is a Frame (faint fill, stroke, rounding 6):
+    * Preview header ........... allocate_exact_size -> Painter draws the
+                                 zone's live look: rect_filled(solid color)
+                                 for Solid mode, or a per-effect painted
+                                 thumbnail (rainbow = multi-stop hsv sweep,
+                                 comet = radial falloff, fire = vertical
+                                 gradient) whose PHASE is sampled at the
+                                 global clock t so linked zones animate in
+                                 lockstep. Zone label + link badge painted
+                                 on top (galley text + small chain glyph).
+    * Source selector .......... two SelectableLabel: [Solid] [Function].
+    * Color swatch ............. color_edit_button_srgb(&mut [u8;3]).
+                                 (Solid: the color; Function: effect base.)
+    * Effect picker ............ ComboBox::from_id_source(zone) shown only
+                                 when source==Function; items Rainbow/Comet/
+                                 Breathe/Fire/Gradient/Police/Wave. Add via
+                                 ui.add_visible / conditional; disabled+greyed
+                                 in Solid mode.
+    * Speed slider ............. Slider 1..=9 (kbd) suffix "".
+    * Brightness slider ........ Slider 0..=100 suffix "%".
+  Zones are INDEPENDENT by default (each owns its own ZoneState).
+
+  --- SHARED-CLOCK AFFORDANCE (the key concept) -------------------
+  App model: there is ONE global animation clock `t` (seconds since start,
+  advanced once per frame). A Function effect is a pure fn of (t, params).
+  So any two zones whose effect==same BOTH read the same `t` and are
+  therefore PHASE-LOCKED for free -- no per-zone timer, no drift. The UI
+  just has to make that ganging legible. Painted, egui-honest:
+    1. Link badge (per panel): when a zone shares its effect with >=1 other
+       zone, paint a small pill top-right of the preview header -- a chain
+       glyph + effect initial -- filled with the per-effect hue. Same hue ==
+       same clock group. Zones on Solid, or the only zone on their effect,
+       get NO badge.
+    2. Shared-clock bracket (under the row): a second horizontal ui below
+       the panels, 4 columns aligned to the panels. For each contiguous run
+       of same-effect zones, Painter draws a "staple": two short vertical
+       ticks down from the two outer panels + a horizontal hairline joining
+       them (line_segment, 2px, per-effect hue), with a centered galley
+       "shared clock . <Effect>" + chain glyph. Non-contiguous members of
+       the same group still share the badge hue (the bracket only draws the
+       contiguous span; the matching badge hue ties the rest together).
+    3. Timeline hairline: a 1-2px per-effect-hued line across the top inner
+       edge of every linked panel's header = "reads global t".
+  Implementation: all three are Painter primitives (rect_filled,
+  line_segment, circle/text) + the badge is a SelectableLabel-style pill.
+  Nothing web-only.
+
+  Status line (bottom) ........... TopBottomPanel::bottom; painted status
+                                   dot + weak text; right side shows the
+                                   live clock t and active-group count.
+  Light variant ................. window #1b1b1b->#f4f4f5, panel->#e8e8ea,
+                                   text strong->#1b1b1b, extreme->#fff;
+                                   keep accent #1fb7a6, darken effect hues
+                                   ~15% for contrast on light rails.
 =====================================================================
 -->
 <meta charset="utf-8">
@@ -93,19 +129,17 @@
 
   /* ---- menu bar ---- */
   .menubar{background:var(--panel);border-bottom:1px solid var(--stroke);
-    display:flex;align-items:center;height:30px;padding:0 6px;gap:2px;
-    user-select:none;}
+    display:flex;align-items:center;height:30px;padding:0 6px;gap:2px;user-select:none;}
   .menubar .m{padding:3px 9px;border-radius:var(--r);color:var(--t);}
   .menubar .m:hover{background:var(--whover);color:var(--t-strong);}
   .menubar .title{margin-left:auto;color:var(--t-faint);font-size:12px;
     padding-right:8px;letter-spacing:.3px;}
   .menubar .title b{color:var(--accent);font-weight:600;}
 
-  /* ---- main split ---- */
   .body{flex:1;display:flex;min-height:0;}
 
   /* ---- left device panel ---- */
-  .side{width:220px;background:var(--panel);border-right:1px solid var(--stroke);
+  .side{width:210px;background:var(--panel);border-right:1px solid var(--stroke);
     display:flex;flex-direction:column;padding:10px 8px;gap:2px;}
   .side .cap{color:var(--t-weak);font-size:11px;text-transform:uppercase;
     letter-spacing:.6px;padding:2px 6px 6px;}
@@ -118,98 +152,68 @@
     border:1px solid rgba(255,255,255,.15);flex:none;}
   .devrow .meta{display:flex;flex-direction:column;line-height:1.25;}
   .devrow .meta small{color:var(--t-weak);font-size:11px;}
-
   .side .sep{height:1px;background:var(--stroke);margin:10px 4px;}
   .master{padding:2px 6px;margin-top:auto;}
   .master label{display:flex;justify-content:space-between;color:var(--t-weak);
     font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px;}
 
   /* ---- generic egui slider ---- */
-  .slider{display:flex;align-items:center;gap:10px;margin:6px 0;}
-  .slider .lab{width:78px;color:var(--t);flex:none;}
+  .slider{display:flex;align-items:center;gap:8px;margin:5px 0;}
+  .slider .lab{width:66px;color:var(--t-weak);flex:none;font-size:11px;
+    text-transform:uppercase;letter-spacing:.4px;}
   .rail{position:relative;flex:1;height:14px;display:flex;align-items:center;}
   .rail .track{position:absolute;left:0;right:0;height:4px;background:var(--extreme);
     border-radius:2px;border:1px solid #000;}
-  .rail .fill{position:absolute;left:0;height:4px;background:var(--accent);
-    border-radius:2px;}
-  .rail .grab{position:absolute;width:12px;height:14px;border-radius:var(--rs);
-    background:var(--accent);transform:translateX(-6px);
-    box-shadow:0 0 0 1px rgba(0,0,0,.4);}
-  .slider .val{width:52px;text-align:right;color:var(--t-strong);flex:none;
-    font-size:12px;}
+  .rail .fill{position:absolute;left:0;height:4px;background:var(--accent);border-radius:2px;}
+  .rail .grab{position:absolute;width:11px;height:14px;border-radius:var(--rs);
+    background:var(--accent);transform:translateX(-6px);box-shadow:0 0 0 1px rgba(0,0,0,.4);}
+  .slider .val{width:40px;text-align:right;color:var(--t-strong);flex:none;font-size:11px;}
 
   /* ---- central editor ---- */
-  .central{flex:1;min-width:0;display:flex;flex-direction:column;
-    padding:14px 18px;overflow:hidden;}
-  .h1{display:flex;align-items:center;gap:10px;color:var(--t-strong);
-    font-size:18px;font-weight:600;}
-  .h1 .swatch{width:18px;height:18px;}
+  .central{flex:1;min-width:0;display:flex;flex-direction:column;padding:14px 18px;overflow:hidden;}
+  .h1{display:flex;align-items:center;gap:10px;color:var(--t-strong);font-size:18px;font-weight:600;}
   .h1 small{margin-left:6px;color:var(--t-weak);font-size:12px;font-weight:400;}
-  .sub{color:var(--t-weak);font-size:12px;margin:3px 0 12px;}
+  .sub{color:var(--t-weak);font-size:12px;margin:3px 0 14px;}
 
-  .group{background:var(--faint);border:1px solid var(--stroke);
-    border-radius:var(--r);padding:12px 14px;margin-bottom:14px;}
-  .group .gt{color:var(--t-weak);font-size:11px;text-transform:uppercase;
-    letter-spacing:.6px;margin-bottom:10px;}
-
-  /* keyboard 4-zone preview */
-  .kbwell{background:var(--extreme);border:1px solid #000;border-radius:var(--r);
-    padding:12px;display:flex;gap:8px;}
-  .zone{flex:1;height:82px;border-radius:var(--r);position:relative;
-    display:flex;align-items:flex-end;justify-content:center;cursor:pointer;
-    border:1px solid rgba(0,0,0,.4);}
-  .zone.sel{outline:2px solid var(--accent);outline-offset:2px;}
-  .zone .zl{font-size:11px;color:rgba(0,0,0,.62);font-weight:700;
-    padding-bottom:6px;letter-spacing:.5px;}
-  .zdots{position:absolute;inset:8px 8px 20px;display:grid;
-    grid-template-columns:repeat(6,1fr);grid-auto-rows:1fr;gap:3px;opacity:.28;}
-  .zdots i{background:#000;border-radius:2px;}
-
-  /* zone color grid */
-  .zgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:12px;}
-  .zpick{display:flex;align-items:center;gap:8px;color:var(--t-weak);font-size:11px;}
-  .colbtn{width:26px;height:20px;border-radius:var(--rs);
+  /* zone panels grid */
+  .zones{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;}
+  .zpanel{background:var(--faint);border:1px solid var(--stroke);border-radius:var(--rc);
+    display:flex;flex-direction:column;overflow:hidden;}
+  .zhead{height:56px;position:relative;display:flex;align-items:flex-end;padding:6px 8px;
+    border-bottom:1px solid #000;}
+  .zhead .zl{font-size:11px;font-weight:700;letter-spacing:.6px;color:rgba(0,0,0,.66);}
+  /* timeline hairline = reads global t */
+  .zhead .tl{position:absolute;top:0;left:0;right:0;height:2px;}
+  /* link badge pill */
+  .lbadge{position:absolute;top:6px;right:6px;display:flex;align-items:center;gap:3px;
+    padding:2px 6px;border-radius:999px;font-size:10px;font-weight:700;color:#08120f;line-height:1;}
+  .lbadge .ch{font-size:11px;}
+  .zbody{padding:10px;display:flex;flex-direction:column;gap:7px;}
+  .srcsel{display:flex;gap:5px;}
+  .srcsel .chip{flex:1;text-align:center;padding:5px 0;border-radius:var(--r);
+    background:var(--wbtn);border:1px solid var(--stroke);color:var(--t);cursor:pointer;font-size:12px;}
+  .srcsel .chip:hover{background:var(--whover);}
+  .srcsel .chip.sel{background:var(--accent);border-color:var(--accent);color:#08201d;font-weight:600;}
+  .fieldrow{display:flex;align-items:center;gap:8px;color:var(--t-weak);font-size:11px;}
+  .colbtn{width:30px;height:20px;border-radius:var(--rs);
     border:1px solid rgba(255,255,255,.18);cursor:pointer;flex:none;}
-  .zgrid.disabled{opacity:.42;pointer-events:none;}
-
-  /* mode selector */
-  .modes{display:flex;flex-wrap:wrap;gap:6px;}
-  .chip{padding:5px 11px;border-radius:var(--r);background:var(--wbtn);
-    border:1px solid var(--stroke);color:var(--t);cursor:pointer;font-size:12px;}
-  .chip:hover{background:var(--whover);color:var(--t-strong);}
-  .chip.sel{background:var(--accent);border-color:var(--accent);color:#08201d;
-    font-weight:600;}
-
-  .paramrow{display:flex;gap:26px;margin-top:12px;}
-  .paramrow .slider{flex:1;margin:0;}
-
-  /* custom effects gallery */
-  .cards{display:flex;gap:12px;overflow-x:auto;padding-bottom:4px;}
-  .cards::-webkit-scrollbar{height:8px;}
-  .cards::-webkit-scrollbar-thumb{background:var(--wbtn);border-radius:4px;}
-  .card{flex:none;width:150px;background:var(--faint);border:1px solid var(--stroke);
-    border-radius:var(--rc);padding:9px;display:flex;flex-direction:column;gap:8px;}
-  .card.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent);}
-  .thumb{height:60px;border-radius:var(--r);border:1px solid #000;}
-  .card .cn{color:var(--t-strong);font-size:12px;font-weight:600;}
-  .card .cr{display:flex;align-items:center;gap:8px;}
-  .btn{padding:4px 10px;border-radius:var(--r);background:var(--wbtn);
+  .combo{flex:1;display:flex;align-items:center;justify-content:space-between;
+    padding:5px 9px;border-radius:var(--r);background:var(--extreme);
     border:1px solid var(--stroke);color:var(--t-strong);cursor:pointer;font-size:12px;}
-  .btn:hover{background:var(--whover);}
-  .btn.play{background:var(--accent);border-color:var(--accent);color:#08201d;
-    font-weight:600;}
-  .btn.stop{color:#e0a3a3;}
-  .mini-rail{position:relative;flex:1;height:12px;display:flex;align-items:center;}
-  .mini-rail .track{position:absolute;left:0;right:0;height:3px;background:var(--extreme);
-    border-radius:2px;}
-  .mini-rail .fill{position:absolute;left:0;height:3px;background:var(--accent);border-radius:2px;}
-  .mini-rail .grab{position:absolute;width:9px;height:12px;border-radius:2px;
-    background:var(--accent);transform:translateX(-4px);}
+  .combo .ar{color:var(--t-weak);}
+  .combo.disabled{opacity:.4;pointer-events:none;}
+
+  /* shared-clock bracket row (aligned to the 4 columns) */
+  .clockrow{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;height:34px;margin-top:2px;}
+  .staple{position:relative;display:flex;align-items:center;justify-content:center;}
+  .staple .u{position:absolute;top:0;left:6px;right:6px;height:14px;
+    border:2px solid;border-top:none;border-radius:0 0 6px 6px;}
+  .staple .lbl{position:absolute;top:15px;display:flex;align-items:center;gap:5px;
+    font-size:10px;font-weight:600;white-space:nowrap;}
 
   /* status bar */
   .status{background:var(--panel);border-top:1px solid var(--stroke);height:26px;
-    display:flex;align-items:center;padding:0 12px;gap:8px;color:var(--t-weak);
-    font-size:12px;}
+    display:flex;align-items:center;padding:0 12px;gap:8px;color:var(--t-weak);font-size:12px;}
   .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);
     box-shadow:0 0 5px var(--ok);flex:none;}
   .status .r{margin-left:auto;color:var(--t-faint);}
@@ -232,15 +236,13 @@
       <div class="cap">Devices</div>
 
       <div class="devrow sel">
-        <span class="swatch" style="background:linear-gradient(90deg,#ff2d55 0 25%,#ff9500 25% 50%,#1fb7a6 50% 75%,#5e5ce6 75% 100%)"></span>
+        <span class="swatch" style="background:linear-gradient(90deg,#ff2d55 0 25%,#1fb7a6 25% 50%,#1fb7a6 50% 75%,#ff9500 75% 100%)"></span>
         <span class="meta">Keyboard<small>4 zones</small></span>
       </div>
-
       <div class="devrow">
-        <span class="swatch" style="background:#1fb7a6"></span>
+        <span class="swatch" style="background:#5e5ce6"></span>
         <span class="meta">Cover Logo<small>shield · 1 LED</small></span>
       </div>
-
       <div class="devrow">
         <span class="swatch" style="background:#ff9500"></span>
         <span class="meta">Mode-Key LED<small>1 LED</small></span>
@@ -250,116 +252,87 @@
 
       <div class="master">
         <label><span>Master brightness</span><span class="mono">82%</span></label>
-        <div class="rail">
-          <div class="track"></div>
-          <div class="fill" style="width:82%"></div>
-          <div class="grab" style="left:82%"></div>
-        </div>
+        <div class="rail"><div class="track"></div><div class="fill" style="width:82%"></div><div class="grab" style="left:82%"></div></div>
       </div>
     </div>
 
     <!-- CENTRAL EDITOR -->
     <div class="central">
-      <div class="h1">
-        <span class="swatch" style="background:linear-gradient(90deg,#ff2d55 0 25%,#ff9500 25% 50%,#1fb7a6 50% 75%,#5e5ce6 75% 100%)"></span>
-        Keyboard <small>OpenRGB · Acer 4-Zone</small>
-      </div>
-      <div class="sub">4 addressable zones · left → right · per-zone color in Direct/Static</div>
+      <div class="h1">Keyboard <small>OpenRGB · Acer 4-Zone · each zone independent</small></div>
+      <div class="sub">Zones sharing a Function run one global clock — phase-locked, shown by the link badge + bracket.</div>
 
-      <!-- preview + zone colors -->
-      <div class="group">
-        <div class="gt">Zone preview — click a zone to select</div>
-        <div class="kbwell">
-          <div class="zone sel" style="background:#ff2d55">
-            <div class="zdots"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      <!-- 4 PER-ZONE CONTROL PANELS -->
+      <div class="zones">
+
+        <!-- ZONE 1: Solid, no link -->
+        <div class="zpanel">
+          <div class="zhead" style="background:#ff2d55">
             <span class="zl">ZONE 1</span>
           </div>
-          <div class="zone" style="background:#ff9500">
-            <div class="zdots"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
-            <span class="zl">ZONE 2</span>
+          <div class="zbody">
+            <div class="srcsel"><div class="chip sel">Solid</div><div class="chip">Function</div></div>
+            <div class="fieldrow"><span class="colbtn" style="background:#ff2d55"></span>Color</div>
+            <div class="combo disabled"><span>— no effect —</span><span class="ar">▾</span></div>
+            <div class="slider"><span class="lab">Speed</span><div class="rail"><div class="track"></div></div><span class="val mono">—</span></div>
+            <div class="slider"><span class="lab">Bright</span><div class="rail"><div class="track"></div><div class="fill" style="width:90%"></div><div class="grab" style="left:90%"></div></div><span class="val mono">90</span></div>
           </div>
-          <div class="zone" style="background:#1fb7a6">
-            <div class="zdots"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
-            <span class="zl">ZONE 3</span>
+        </div>
+
+        <!-- ZONE 2: Function=Comet, LINKED (teal) -->
+        <div class="zpanel">
+          <div class="zhead" style="background:radial-gradient(circle at 25% 55%,#1fb7a6,#0c2b28 62%)">
+            <span class="tl" style="background:#1fb7a6"></span>
+            <span class="lbadge" style="background:#1fb7a6"><span class="ch">⛓</span>C</span>
+            <span class="zl" style="color:rgba(255,255,255,.85)">ZONE 2</span>
           </div>
-          <div class="zone" style="background:#5e5ce6">
-            <div class="zdots"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+          <div class="zbody">
+            <div class="srcsel"><div class="chip">Solid</div><div class="chip sel">Function</div></div>
+            <div class="fieldrow"><span class="colbtn" style="background:#1fb7a6"></span>Base color</div>
+            <div class="combo"><span>Comet</span><span class="ar">▾</span></div>
+            <div class="slider"><span class="lab">Speed</span><div class="rail"><div class="track"></div><div class="fill" style="width:55%"></div><div class="grab" style="left:55%"></div></div><span class="val mono">5</span></div>
+            <div class="slider"><span class="lab">Bright</span><div class="rail"><div class="track"></div><div class="fill" style="width:80%"></div><div class="grab" style="left:80%"></div></div><span class="val mono">80</span></div>
+          </div>
+        </div>
+
+        <!-- ZONE 3: Function=Comet, LINKED (teal, shares clock w/ Z2) -->
+        <div class="zpanel">
+          <div class="zhead" style="background:radial-gradient(circle at 60% 55%,#1fb7a6,#0c2b28 62%)">
+            <span class="tl" style="background:#1fb7a6"></span>
+            <span class="lbadge" style="background:#1fb7a6"><span class="ch">⛓</span>C</span>
+            <span class="zl" style="color:rgba(255,255,255,.85)">ZONE 3</span>
+          </div>
+          <div class="zbody">
+            <div class="srcsel"><div class="chip">Solid</div><div class="chip sel">Function</div></div>
+            <div class="fieldrow"><span class="colbtn" style="background:#1fb7a6"></span>Base color</div>
+            <div class="combo"><span>Comet</span><span class="ar">▾</span></div>
+            <div class="slider"><span class="lab">Speed</span><div class="rail"><div class="track"></div><div class="fill" style="width:55%"></div><div class="grab" style="left:55%"></div></div><span class="val mono">5</span></div>
+            <div class="slider"><span class="lab">Bright</span><div class="rail"><div class="track"></div><div class="fill" style="width:65%"></div><div class="grab" style="left:65%"></div></div><span class="val mono">65</span></div>
+          </div>
+        </div>
+
+        <!-- ZONE 4: Function=Fire, solo (no link) -->
+        <div class="zpanel">
+          <div class="zhead" style="background:linear-gradient(0deg,#ff2d55,#ff9500 55%,#ffe600 92%)">
             <span class="zl">ZONE 4</span>
           </div>
-        </div>
-
-        <div class="zgrid">
-          <div class="zpick"><span class="colbtn" style="background:#ff2d55"></span>Zone 1</div>
-          <div class="zpick"><span class="colbtn" style="background:#ff9500"></span>Zone 2</div>
-          <div class="zpick"><span class="colbtn" style="background:#1fb7a6"></span>Zone 3</div>
-          <div class="zpick"><span class="colbtn" style="background:#5e5ce6"></span>Zone 4</div>
-        </div>
-      </div>
-
-      <!-- mode + params -->
-      <div class="group">
-        <div class="gt">Hardware mode</div>
-        <div class="modes">
-          <div class="chip sel">Direct</div>
-          <div class="chip">Static</div>
-          <div class="chip">Breathing</div>
-          <div class="chip">Neon</div>
-          <div class="chip">Wave</div>
-          <div class="chip">Shifting</div>
-          <div class="chip">Zoom</div>
-          <div class="chip">Meteor</div>
-          <div class="chip">Twinkling</div>
-        </div>
-
-        <div class="paramrow">
-          <div class="slider">
-            <span class="lab">Speed</span>
-            <div class="rail"><div class="track"></div><div class="fill" style="width:44%"></div><div class="grab" style="left:44%"></div></div>
-            <span class="val mono">4 / 9</span>
-          </div>
-          <div class="slider">
-            <span class="lab">Brightness</span>
-            <div class="rail"><div class="track"></div><div class="fill" style="width:75%"></div><div class="grab" style="left:75%"></div></div>
-            <span class="val mono">75%</span>
+          <div class="zbody">
+            <div class="srcsel"><div class="chip">Solid</div><div class="chip sel">Function</div></div>
+            <div class="fieldrow"><span class="colbtn" style="background:#ff9500"></span>Base color</div>
+            <div class="combo"><span>Fire</span><span class="ar">▾</span></div>
+            <div class="slider"><span class="lab">Speed</span><div class="rail"><div class="track"></div><div class="fill" style="width:70%"></div><div class="grab" style="left:70%"></div></div><span class="val mono">7</span></div>
+            <div class="slider"><span class="lab">Bright</span><div class="rail"><div class="track"></div><div class="fill" style="width:85%"></div><div class="grab" style="left:85%"></div></div><span class="val mono">85</span></div>
           </div>
         </div>
       </div>
 
-      <!-- custom effects -->
-      <div class="group" style="margin-bottom:0">
-        <div class="gt">Custom effects — animated by colormemuch</div>
-        <div class="cards">
-          <div class="card sel">
-            <div class="thumb" style="background:linear-gradient(90deg,#ff2d55,#ff9500,#ffe600,#4bbf73,#1fb7a6,#5e5ce6,#ff2d55)"></div>
-            <div class="cn">Rainbow Cycle</div>
-            <div class="cr"><span class="btn stop">Stop</span>
-              <div class="mini-rail"><div class="track"></div><div class="fill" style="width:60%"></div><div class="grab" style="left:60%"></div></div></div>
-          </div>
-          <div class="card">
-            <div class="thumb" style="background:radial-gradient(circle at 20% 50%,#1fb7a6,transparent 40%),#101013"></div>
-            <div class="cn">Comet / Scanner</div>
-            <div class="cr"><span class="btn play">Play</span>
-              <div class="mini-rail"><div class="track"></div><div class="fill" style="width:45%"></div><div class="grab" style="left:45%"></div></div></div>
-          </div>
-          <div class="card">
-            <div class="thumb" style="background:radial-gradient(ellipse at 50% 60%,#5e5ce6,#1b1b1b 70%)"></div>
-            <div class="cn">Breathing</div>
-            <div class="cr"><span class="btn play">Play</span>
-              <div class="mini-rail"><div class="track"></div><div class="fill" style="width:30%"></div><div class="grab" style="left:30%"></div></div></div>
-          </div>
-          <div class="card">
-            <div class="thumb" style="background:linear-gradient(0deg,#ff2d55,#ff9500 55%,#ffe600 90%)"></div>
-            <div class="cn">Fire</div>
-            <div class="cr"><span class="btn play">Play</span>
-              <div class="mini-rail"><div class="track"></div><div class="fill" style="width:70%"></div><div class="grab" style="left:70%"></div></div></div>
-          </div>
-          <div class="card">
-            <div class="thumb" style="background:linear-gradient(90deg,#5e5ce6,#1fb7a6)"></div>
-            <div class="cn">Gradient</div>
-            <div class="cr"><span class="btn play">Play</span>
-              <div class="mini-rail"><div class="track"></div><div class="fill" style="width:50%"></div><div class="grab" style="left:50%"></div></div></div>
-          </div>
+      <!-- SHARED-CLOCK BRACKET (staple under zones 2-3) -->
+      <div class="clockrow">
+        <div></div>
+        <div class="staple" style="grid-column:2 / span 2;color:#1fb7a6">
+          <div class="u" style="border-color:#1fb7a6"></div>
+          <div class="lbl">⛓ shared clock · Comet · phase-locked (t = 12.84s)</div>
         </div>
+        <div></div>
       </div>
 
     </div>
@@ -368,7 +341,7 @@
   <!-- STATUS BAR -->
   <div class="status">
     <span class="dot"></span>Connected to OpenRGB server · 127.0.0.1:6742 · 3 devices
-    <span class="r mono">v0.1.0 · Direct mode · applied live</span>
+    <span class="r mono">clock t=12.84s · 1 shared group (Comet ×2) · applied live</span>
   </div>
 
 </div>

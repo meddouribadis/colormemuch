@@ -20,7 +20,7 @@ use std::f32::consts::PI;
 use crate::rgb::Rgb;
 
 /// The catalogue of built-in software effects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Effect {
     /// A hue that rotates over time, spread across the strip.
     Rainbow,
@@ -227,6 +227,22 @@ impl ZoneSource {
             ZoneSource::Function(e, _) => Some(*e),
         }
     }
+    pub fn params(&self) -> Option<Params> {
+        match self {
+            ZoneSource::Solid(_) => None,
+            ZoneSource::Function(_, p) => Some(*p),
+        }
+    }
+}
+
+/// How a shared-clock group of zones reads its one clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClockMode {
+    /// Every ganged zone shows the identical color — a unified block.
+    Link,
+    /// The effect travels across the ganged zones (each zone is one cell of a
+    /// group-length strip), still off the one shared clock.
+    Spread,
 }
 
 /// Sample one zone (a single LED) at shared-clock time `t`.
@@ -282,6 +298,62 @@ pub fn play_zones(
             break;
         }
         let frame = render_zones(zones, t);
+        client.set_leds(ctrl, &frame)?;
+        std::thread::sleep(frame_dt);
+    }
+    Ok(())
+}
+
+/// Render zones with per-effect Link/Spread control.
+///
+/// Effects listed in `spread` render as one animation travelling across their
+/// ganged zones (each zone is a cell of a group-length strip); all others Link
+/// (every ganged zone identical). Everything still reads the single clock `t`,
+/// so no mode ever drifts. `spread` naming an effect that isn't ganged is a
+/// harmless no-op.
+pub fn render_plan(
+    sources: &[ZoneSource],
+    spread: &std::collections::HashSet<Effect>,
+    t: f32,
+) -> Vec<Rgb> {
+    // Base: solids and singleton effects rendered independently; same-effect
+    // Link groups already coincide when params match — the loop makes Link
+    // exact regardless of params, and overrides Spread groups.
+    let mut out = render_zones(sources, t);
+    for (effect, idxs) in shared_clock_groups(sources) {
+        let p = sources[idxs[0]].params().unwrap_or_default();
+        if spread.contains(&effect) {
+            let strip = render(effect, p, t, idxs.len());
+            for (pos, &zi) in idxs.iter().enumerate() {
+                out[zi] = strip[pos];
+            }
+        } else {
+            let c = render(effect, p, t, 1)[0];
+            for &zi in &idxs {
+                out[zi] = c;
+            }
+        }
+    }
+    out
+}
+
+/// Like [`play_zones`] but honoring per-effect Link/Spread.
+pub fn play_plan(
+    client: &mut OpenRgb,
+    ctrl: &Controller,
+    sources: &[ZoneSource],
+    spread: &std::collections::HashSet<Effect>,
+    secs: f32,
+    fps: u32,
+) -> std::io::Result<()> {
+    let frame_dt = std::time::Duration::from_secs_f32(1.0 / fps.max(1) as f32);
+    let start = std::time::Instant::now();
+    loop {
+        let t = start.elapsed().as_secs_f32();
+        if t >= secs {
+            break;
+        }
+        let frame = render_plan(sources, spread, t);
         client.set_leds(ctrl, &frame)?;
         std::thread::sleep(frame_dt);
     }
@@ -385,6 +457,33 @@ mod tests {
         assert_eq!(groups[0].1, vec![0, 2]);
     }
 
+    #[test]
+    fn link_vs_spread() {
+        use std::collections::HashSet;
+        let p = Params::default();
+        let zones = [
+            ZoneSource::Function(Effect::Rainbow, p),
+            ZoneSource::Function(Effect::Rainbow, p),
+            ZoneSource::Function(Effect::Rainbow, p),
+            ZoneSource::Function(Effect::Rainbow, p),
+        ];
+
+        // Link (empty spread set): all four identical.
+        let linked = render_plan(&zones, &HashSet::new(), 2.0);
+        assert!(linked.iter().all(|&c| c == linked[0]), "Link must be uniform");
+
+        // Spread: the group renders as a 4-cell rainbow, so not all equal.
+        let mut spread = HashSet::new();
+        spread.insert(Effect::Rainbow);
+        let spread_frame = render_plan(&zones, &spread, 2.0);
+        assert!(
+            !spread_frame.iter().all(|&c| c == spread_frame[0]),
+            "Spread must vary across zones"
+        );
+        // Still drift-free / deterministic.
+        assert_eq!(spread_frame, render_plan(&zones, &spread, 2.0));
+    }
+
     /// Live demo against the running OpenRGB server — plays a few software
     /// effects on the keyboard. No elevation. Ignored so CI skips it.
     ///
@@ -430,5 +529,29 @@ mod tests {
             shared_clock_groups(&zones)
         );
         play_zones(&mut c, &kb, &zones, 10.0, 30).expect("play zones");
+    }
+
+    /// Live: all 4 zones on Rainbow, SPREAD — one rainbow travels across the
+    /// keyboard on the shared clock. Then Link would make them a single block.
+    ///
+    /// ```text
+    /// cargo test --bin colormemuch -- --ignored --exact \
+    ///     effects::tests::hw_play_spread_demo --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs the local OpenRGB server; animates the keyboard"]
+    fn hw_play_spread_demo() {
+        use crate::openrgb::OpenRgb;
+        use std::collections::HashSet;
+        let mut c = OpenRgb::connect().expect("connect");
+        let kb = c.find("keyboard").expect("query").expect("keyboard");
+        let zones = [ZoneSource::Function(Effect::Rainbow, Params::default()); 4];
+
+        let spread: HashSet<Effect> = [Effect::Rainbow].into_iter().collect();
+        eprintln!("SPREAD: one rainbow travels across all 4 zones");
+        play_plan(&mut c, &kb, &zones, &spread, 8.0, 30).expect("spread");
+
+        eprintln!("LINK: all 4 zones move as one block");
+        play_plan(&mut c, &kb, &zones, &HashSet::new(), 6.0, 30).expect("link");
     }
 }
