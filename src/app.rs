@@ -7,6 +7,10 @@ pub struct ColormemuchApp {
     pub config: Config,
     pub status: Option<String>,
 
+    // The RGB control screen.
+    #[cfg(windows)]
+    rgb: crate::ui::RgbControl,
+
     // Self-update plumbing.
     pub update_state: UpdateState,
     pub update_error: Option<String>,
@@ -32,6 +36,8 @@ impl ColormemuchApp {
         Self {
             config,
             status: None,
+            #[cfg(windows)]
+            rgb: crate::ui::RgbControl::new(),
             update_state: UpdateState::Checking,
             update_error: None,
             update_rx: Some(rx),
@@ -76,11 +82,16 @@ impl eframe::App for ColormemuchApp {
             });
         });
 
+        // The RGB control screen owns the left device panel + central editor.
+        #[cfg(windows)]
+        self.rgb.show(ctx);
+
+        #[cfg(not(windows))]
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(40.0);
                 ui.heading(crate::APP_NAME);
-                ui.label("Starter app — replace this with your features.");
+                ui.label("Windows only.");
             });
         });
     }

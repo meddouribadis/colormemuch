@@ -10,6 +10,8 @@ mod openrgb;
 #[cfg(windows)]
 mod rgb;
 #[cfg(windows)]
+mod ui;
+#[cfg(windows)]
 mod wmi;
 
 use eframe::egui;
