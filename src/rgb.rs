@@ -16,6 +16,9 @@
 //!   the anchor a future decode diffs against.
 
 #![cfg(windows)]
+// See wmi.rs: this layer's callers are tests and the coming CLI, not `main`
+// yet, so silence dead-code noise until it's wired up.
+#![allow(dead_code)]
 
 use crate::wmi::{Result, Wmi};
 

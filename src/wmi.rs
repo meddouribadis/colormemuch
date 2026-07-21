@@ -20,6 +20,11 @@
 //! letting it read as a bad payload.
 
 #![cfg(windows)]
+// The RGB layer is exercised by tests and the (coming) CLI, not yet from the
+// egui `main` path, so most of it reads as dead code to the default build.
+// Silence that until `main`/`cli.rs` wires it up — it's just noise now, and it
+// was burying the actual test output. Remove when the layer has real callers.
+#![allow(dead_code)]
 
 use std::fmt;
 
