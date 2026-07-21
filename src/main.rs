@@ -6,6 +6,8 @@ mod git_update;
 #[cfg(windows)]
 mod effects;
 #[cfg(windows)]
+mod library;
+#[cfg(windows)]
 mod openrgb;
 #[cfg(windows)]
 mod rgb;

@@ -212,19 +212,68 @@ pub fn play(
 
 // --- per-zone sources on a shared clock -----------------------------------
 
-/// What drives a single zone: a fixed color, or a function (effect + params).
-#[derive(Debug, Clone, Copy)]
+/// An animated per-zone source — a built-in **Program** effect or a user
+/// **Custom** one. Both render the same `(t, n) -> frame` shape, so the engine
+/// handles them uniformly.
+#[derive(Debug, Clone)]
+pub enum Fx {
+    Program(Effect),
+    Custom(crate::library::CustomEffect),
+}
+
+impl Fx {
+    pub fn sample(&self, p: Params, t: f32, n: usize) -> Vec<Rgb> {
+        match self {
+            Fx::Program(e) => render(*e, p, t, n),
+            Fx::Custom(c) => c.sample(t, n, p.speed, p.brightness),
+        }
+    }
+    /// Identity for shared-clock grouping — same key ⇒ same clock group.
+    pub fn key(&self) -> String {
+        match self {
+            Fx::Program(e) => format!("p:{}", e.label()),
+            Fx::Custom(c) => format!("c:{}", c.name),
+        }
+    }
+    pub fn label(&self) -> String {
+        match self {
+            Fx::Program(e) => e.label().to_string(),
+            Fx::Custom(c) => c.name.clone(),
+        }
+    }
+    pub fn hue(&self) -> Rgb {
+        match self {
+            Fx::Program(e) => program_hue(*e),
+            Fx::Custom(c) => c.dominant(),
+        }
+    }
+}
+
+/// Program-effect hue for badges (matches the mockup design tokens).
+pub fn program_hue(e: Effect) -> Rgb {
+    match e {
+        Effect::Comet => Rgb(0x1f, 0xb7, 0xa6),
+        Effect::Fire => Rgb(0xff, 0x95, 0x00),
+        Effect::Rainbow => Rgb(0xd8, 0x4b, 0xff),
+        Effect::Breathe => Rgb(0x5e, 0x5c, 0xe6),
+        Effect::Wave => Rgb(0x34, 0xc0, 0xff),
+        Effect::Police => Rgb(0xff, 0x3b, 0x4e),
+        Effect::Gradient => Rgb(0x4b, 0xbf, 0x73),
+    }
+}
+
+/// What drives a single zone: a fixed color, or an animated function.
+#[derive(Debug, Clone)]
 pub enum ZoneSource {
     Solid(Rgb),
-    Function(Effect, Params),
+    Function(Fx, Params),
 }
 
 impl ZoneSource {
-    /// The effect a zone runs, if any — used to tell which zones share a clock.
-    pub fn effect(&self) -> Option<Effect> {
+    pub fn fx(&self) -> Option<&Fx> {
         match self {
             ZoneSource::Solid(_) => None,
-            ZoneSource::Function(e, _) => Some(*e),
+            ZoneSource::Function(f, _) => Some(f),
         }
     }
     pub fn params(&self) -> Option<Params> {
@@ -249,7 +298,7 @@ pub enum ClockMode {
 pub fn render_zone(src: &ZoneSource, t: f32) -> Rgb {
     match src {
         ZoneSource::Solid(c) => *c,
-        ZoneSource::Function(e, p) => render(*e, *p, t, 1)[0],
+        ZoneSource::Function(f, p) => f.sample(*p, t, 1)[0],
     }
 }
 
@@ -264,19 +313,35 @@ pub fn render_zones(zones: &[ZoneSource], t: f32) -> Vec<Rgb> {
     zones.iter().map(|z| render_zone(z, t)).collect()
 }
 
-/// Which zone indices are ganged to a shared clock: groups of ≥2 zones running
-/// the same effect. Handy for the UI's "link" affordance.
-pub fn shared_clock_groups(zones: &[ZoneSource]) -> Vec<(Effect, Vec<usize>)> {
-    let mut out: Vec<(Effect, Vec<usize>)> = Vec::new();
+/// A shared-clock group: ≥2 zones running the same function, phase-locked.
+#[derive(Debug, Clone)]
+pub struct Group {
+    /// Stable identity (`Fx::key`) — also the key used in the Spread set.
+    pub key: String,
+    pub label: String,
+    pub hue: Rgb,
+    pub zones: Vec<usize>,
+}
+
+/// Which zone indices are ganged to a shared clock. Handy for the UI's "link"
+/// affordance and for [`render_plan`]'s Link/Spread decision.
+pub fn shared_clock_groups(zones: &[ZoneSource]) -> Vec<Group> {
+    let mut out: Vec<Group> = Vec::new();
     for (i, z) in zones.iter().enumerate() {
-        if let Some(e) = z.effect() {
-            match out.iter_mut().find(|(fe, _)| *fe == e) {
-                Some((_, idxs)) => idxs.push(i),
-                None => out.push((e, vec![i])),
+        if let Some(f) = z.fx() {
+            let key = f.key();
+            match out.iter_mut().find(|g| g.key == key) {
+                Some(g) => g.zones.push(i),
+                None => out.push(Group {
+                    key,
+                    label: f.label(),
+                    hue: f.hue(),
+                    zones: vec![i],
+                }),
             }
         }
     }
-    out.retain(|(_, idxs)| idxs.len() >= 2);
+    out.retain(|g| g.zones.len() >= 2);
     out
 }
 
@@ -313,23 +378,25 @@ pub fn play_zones(
 /// harmless no-op.
 pub fn render_plan(
     sources: &[ZoneSource],
-    spread: &std::collections::HashSet<Effect>,
+    spread: &std::collections::HashSet<String>,
     t: f32,
 ) -> Vec<Rgb> {
-    // Base: solids and singleton effects rendered independently; same-effect
+    // Base: solids and singleton effects rendered independently; same-function
     // Link groups already coincide when params match — the loop makes Link
     // exact regardless of params, and overrides Spread groups.
     let mut out = render_zones(sources, t);
-    for (effect, idxs) in shared_clock_groups(sources) {
-        let p = sources[idxs[0]].params().unwrap_or_default();
-        if spread.contains(&effect) {
-            let strip = render(effect, p, t, idxs.len());
-            for (pos, &zi) in idxs.iter().enumerate() {
+    for g in shared_clock_groups(sources) {
+        let i0 = g.zones[0];
+        let Some(fx) = sources[i0].fx() else { continue };
+        let p = sources[i0].params().unwrap_or_default();
+        if spread.contains(&g.key) {
+            let strip = fx.sample(p, t, g.zones.len());
+            for (pos, &zi) in g.zones.iter().enumerate() {
                 out[zi] = strip[pos];
             }
         } else {
-            let c = render(effect, p, t, 1)[0];
-            for &zi in &idxs {
+            let c = fx.sample(p, t, 1)[0];
+            for &zi in &g.zones {
                 out[zi] = c;
             }
         }
@@ -342,7 +409,7 @@ pub fn play_plan(
     client: &mut OpenRgb,
     ctrl: &Controller,
     sources: &[ZoneSource],
-    spread: &std::collections::HashSet<Effect>,
+    spread: &std::collections::HashSet<String>,
     secs: f32,
     fps: u32,
 ) -> std::io::Result<()> {
@@ -435,14 +502,19 @@ mod tests {
         assert_eq!(hsv(2.0 / 3.0, 1.0, 1.0), Rgb(0, 0, 255));
     }
 
+    fn prog(e: Effect) -> Fx {
+        Fx::Program(e)
+    }
+
     #[test]
     fn same_function_zones_share_one_clock() {
         // Zones 0 and 2 both run Rainbow: on the shared clock they must be
         // byte-identical at every instant (phase-locked). Zone 1 differs.
+        let p = Params::default();
         let zones = [
-            ZoneSource::Function(Effect::Rainbow, Params::default()),
-            ZoneSource::Function(Effect::Comet, Params::default()),
-            ZoneSource::Function(Effect::Rainbow, Params::default()),
+            ZoneSource::Function(prog(Effect::Rainbow), p),
+            ZoneSource::Function(prog(Effect::Comet), p),
+            ZoneSource::Function(prog(Effect::Rainbow), p),
             ZoneSource::Solid(Rgb(10, 20, 30)),
         ];
         for &t in &[0.0f32, 0.37, 1.9, 5.5] {
@@ -453,8 +525,9 @@ mod tests {
 
         let groups = shared_clock_groups(&zones);
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].0, Effect::Rainbow);
-        assert_eq!(groups[0].1, vec![0, 2]);
+        assert_eq!(groups[0].label, "Rainbow");
+        assert_eq!(groups[0].key, "p:Rainbow");
+        assert_eq!(groups[0].zones, vec![0, 2]);
     }
 
     #[test]
@@ -462,10 +535,10 @@ mod tests {
         use std::collections::HashSet;
         let p = Params::default();
         let zones = [
-            ZoneSource::Function(Effect::Rainbow, p),
-            ZoneSource::Function(Effect::Rainbow, p),
-            ZoneSource::Function(Effect::Rainbow, p),
-            ZoneSource::Function(Effect::Rainbow, p),
+            ZoneSource::Function(prog(Effect::Rainbow), p),
+            ZoneSource::Function(prog(Effect::Rainbow), p),
+            ZoneSource::Function(prog(Effect::Rainbow), p),
+            ZoneSource::Function(prog(Effect::Rainbow), p),
         ];
 
         // Link (empty spread set): all four identical.
@@ -473,8 +546,7 @@ mod tests {
         assert!(linked.iter().all(|&c| c == linked[0]), "Link must be uniform");
 
         // Spread: the group renders as a 4-cell rainbow, so not all equal.
-        let mut spread = HashSet::new();
-        spread.insert(Effect::Rainbow);
+        let spread: HashSet<String> = ["p:Rainbow".to_string()].into_iter().collect();
         let spread_frame = render_plan(&zones, &spread, 2.0);
         assert!(
             !spread_frame.iter().all(|&c| c == spread_frame[0]),
@@ -519,9 +591,9 @@ mod tests {
         let kb = c.find("keyboard").expect("query").expect("keyboard");
         let p = Params::default();
         let zones = [
-            ZoneSource::Function(Effect::Rainbow, p),
-            ZoneSource::Function(Effect::Comet, p),
-            ZoneSource::Function(Effect::Rainbow, p),
+            ZoneSource::Function(prog(Effect::Rainbow), p),
+            ZoneSource::Function(prog(Effect::Comet), p),
+            ZoneSource::Function(prog(Effect::Rainbow), p),
             ZoneSource::Solid(Rgb(0xFF, 0x30, 0x00)),
         ];
         eprintln!(
@@ -545,13 +617,13 @@ mod tests {
         use std::collections::HashSet;
         let mut c = OpenRgb::connect().expect("connect");
         let kb = c.find("keyboard").expect("query").expect("keyboard");
-        let zones = [ZoneSource::Function(Effect::Rainbow, Params::default()); 4];
+        let zones = vec![ZoneSource::Function(prog(Effect::Rainbow), Params::default()); 4];
 
-        let spread: HashSet<Effect> = [Effect::Rainbow].into_iter().collect();
+        let spread: HashSet<String> = ["p:Rainbow".to_string()].into_iter().collect();
         eprintln!("SPREAD: one rainbow travels across all 4 zones");
         play_plan(&mut c, &kb, &zones, &spread, 8.0, 30).expect("spread");
 
         eprintln!("LINK: all 4 zones move as one block");
-        play_plan(&mut c, &kb, &zones, &HashSet::new(), 6.0, 30).expect("link");
+        play_plan(&mut c, &kb, &zones, &HashSet::<String>::new(), 6.0, 30).expect("link");
     }
 }

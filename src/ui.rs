@@ -1,13 +1,11 @@
-//! The egui RGB control screen — the mockup made real.
+//! The egui RGB control screen.
 //!
-//! Layout mirrors `docs/mockups/colormemuch-ui.html`: a left device list, a
-//! central row of per-zone control panels, and a shared-clock strip under them.
-//! Every zone commands its own [`ZoneSource`]; zones running the same effect are
-//! phase-locked to one global clock, shown Link or Spread per group.
-//!
-//! The OpenRGB connect + enumerate is done on a worker thread so the window
-//! never blocks on a missing server. Once connected, each frame samples
-//! [`crate::effects::render_plan`] at the global clock and pushes it.
+//! Three effect types, wired to their nature:
+//! * **Core** — firmware effects; whole-device, zero host CPU. A device-level
+//!   mode ([`DeviceMode::Hardware`]) set once via `apply_effect`.
+//! * **Program** — our built-in `fn(t,n)` effects; per-zone, animated.
+//! * **Custom** — user-built palette+motion effects from the [`EffectLibrary`];
+//!   per-zone, animated, and fully editable in the in-app editor.
 
 #![cfg(windows)]
 
@@ -17,28 +15,30 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, RichText};
 
-use crate::effects::{render_plan, scale, shared_clock_groups, Effect, Params, ZoneSource};
+use crate::effects::{render_plan, scale, shared_clock_groups, Effect, Fx, Group, Params, ZoneSource};
+use crate::library::{ColorStop, CustomEffect, EffectLibrary, Motion};
 use crate::openrgb::{Controller, OpenRgb};
 use crate::rgb::Rgb;
 
-/// How often we push frames to the hardware / repaint while animating. These
-/// effects live on 4 zones of slow color motion, so 20 is visually identical to
-/// 30 at meaningfully less CPU. Static changes still apply instantly (they don't
-/// wait for a tick).
 const PUSH_HZ: f32 = 20.0;
 
-#[derive(Clone, Copy, PartialEq)]
-enum Source {
+// Type accents (match the mockup tokens).
+const CORE_HUE: Color32 = Color32::from_rgb(0x4b, 0xbf, 0x73); // green: 0 CPU
+const PROG_HUE: Color32 = Color32::from_rgb(0x1f, 0xb7, 0xa6); // teal
+const CUST_HUE: Color32 = Color32::from_rgb(0xb0, 0x7c, 0xff); // purple
+
+/// A zone's animated/static source choice.
+#[derive(Clone, PartialEq)]
+enum Kind {
     Solid,
-    Function,
+    Program(Effect),
+    Custom(String),
 }
 
-/// Editable state for one zone (one LED).
 #[derive(Clone)]
 struct ZoneUi {
-    source: Source,
+    kind: Kind,
     color: [u8; 3],
-    effect: Effect,
     speed: u32,      // 1..=9
     brightness: u32, // 0..=100
 }
@@ -46,9 +46,8 @@ struct ZoneUi {
 impl Default for ZoneUi {
     fn default() -> Self {
         Self {
-            source: Source::Solid,
+            kind: Kind::Solid,
             color: [0x00, 0xE5, 0xFF],
-            effect: Effect::Rainbow,
             speed: 5,
             brightness: 100,
         }
@@ -56,21 +55,54 @@ impl Default for ZoneUi {
 }
 
 impl ZoneUi {
-    fn to_source(&self) -> ZoneSource {
+    fn to_source(&self, lib: &EffectLibrary) -> ZoneSource {
         let color = Rgb(self.color[0], self.color[1], self.color[2]);
-        match self.source {
-            Source::Solid => ZoneSource::Solid(color),
-            Source::Function => ZoneSource::Function(
-                self.effect,
-                Params {
-                    color,
-                    color_b: Rgb(0xFF, 0x00, 0x88),
-                    speed: self.speed as f32 / 5.0, // 5 == nominal 1.0x
-                    brightness: self.brightness as f32 / 100.0,
-                },
-            ),
+        let params = Params {
+            color,
+            color_b: Rgb(0xFF, 0x00, 0x88),
+            speed: self.speed as f32 / 5.0,
+            brightness: self.brightness as f32 / 100.0,
+        };
+        match &self.kind {
+            Kind::Solid => ZoneSource::Solid(color),
+            Kind::Program(e) => ZoneSource::Function(Fx::Program(*e), params),
+            Kind::Custom(name) => match lib.get(name) {
+                Some(c) => ZoneSource::Function(Fx::Custom(c.clone()), params),
+                None => ZoneSource::Solid(color),
+            },
         }
     }
+}
+
+/// A whole-device firmware (Core) effect — the zero-CPU path.
+#[derive(Clone)]
+struct HwEffect {
+    mode: String,
+    color: [u8; 3],
+    speed: u32,
+    brightness: u32,
+}
+
+impl HwEffect {
+    fn signature(&self) -> String {
+        format!(
+            "{}|{:?}|{}|{}",
+            self.mode, self.color, self.speed, self.brightness
+        )
+    }
+}
+
+#[derive(Clone)]
+enum DeviceMode {
+    PerZone,
+    Hardware(HwEffect),
+}
+
+/// State of the custom-effect editor window.
+struct EditorState {
+    /// Name being replaced (rename support); None for a brand-new effect.
+    replacing: Option<String>,
+    draft: CustomEffect,
 }
 
 enum Conn {
@@ -78,13 +110,10 @@ enum Conn {
     Ready {
         client: OpenRgb,
         controllers: Vec<Controller>,
-        /// Parallel to `controllers`; one Vec of zones per controller.
         zones: Vec<Vec<ZoneUi>>,
-        /// Whether each controller has been switched into Direct mode yet —
-        /// so we send SET_CUSTOM_MODE once, not every frame.
+        dev_mode: Vec<DeviceMode>,
         direct_set: Vec<bool>,
-        /// Last frame pushed per controller; a device is only re-sent when its
-        /// frame actually changes, so static devices go quiet.
+        applied_hw: Vec<Option<String>>,
         last_frame: Vec<Vec<Rgb>>,
     },
     Failed(String),
@@ -96,20 +125,19 @@ pub struct RgbControl {
     rx: Option<mpsc::Receiver<ConnResult>>,
     conn: Conn,
     selected: usize,
-    /// Effects (across the selected device) rendered as Spread rather than Link.
-    spread: HashSet<Effect>,
-    master: u32, // 0..=100
+    spread: HashSet<String>,
+    master: u32,
     clock: Instant,
     last_push: Instant,
-    /// Set when a control changes, so an all-solid device still gets one push.
     dirty: bool,
+    library: EffectLibrary,
+    editor: Option<EditorState>,
 }
 
 impl RgbControl {
     pub fn new() -> Self {
-        let rx = spawn_connect();
         Self {
-            rx: Some(rx),
+            rx: Some(spawn_connect()),
             conn: Conn::Connecting,
             selected: 0,
             spread: HashSet::new(),
@@ -117,6 +145,8 @@ impl RgbControl {
             clock: Instant::now(),
             last_push: Instant::now(),
             dirty: true,
+            library: EffectLibrary::load(),
+            editor: None,
         }
     }
 
@@ -125,14 +155,15 @@ impl RgbControl {
         let t = self.clock.elapsed().as_secs_f32();
 
         egui::SidePanel::left("devices")
-            .exact_width(190.0)
-            .show(ctx, |ui| self.device_panel(ui));
+            .exact_width(210.0)
+            .show(ctx, |ui| self.side_panel(ui));
 
-        egui::CentralPanel::default().show(ctx, |ui| self.editor(ui, t));
+        egui::CentralPanel::default().show(ctx, |ui| self.editor_view(ui, t));
 
-        // Drive the hardware, and keep animating if any zone is a function.
+        self.effect_editor_window(ctx, t);
+
         let animating = self.push_if_due(t);
-        if animating {
+        if animating || self.editor.is_some() {
             ctx.request_repaint_after(Duration::from_secs_f32(1.0 / PUSH_HZ));
         }
     }
@@ -143,16 +174,18 @@ impl RgbControl {
                 self.rx = None;
                 self.conn = match res {
                     Ok((client, controllers)) => {
-                        let zones: Vec<Vec<ZoneUi>> = controllers
+                        let n = controllers.len();
+                        let zones = controllers
                             .iter()
                             .map(|c| vec![ZoneUi::default(); c.led_count as usize])
                             .collect();
-                        let n = controllers.len();
                         Conn::Ready {
                             client,
                             controllers,
                             zones,
+                            dev_mode: vec![DeviceMode::PerZone; n],
                             direct_set: vec![false; n],
+                            applied_hw: vec![None; n],
                             last_frame: vec![Vec::new(); n],
                         }
                     }
@@ -163,15 +196,19 @@ impl RgbControl {
         }
     }
 
-    fn device_panel(&mut self, ui: &mut egui::Ui) {
+    // ---- left panel: devices, custom-effect library, master ----------------
+
+    fn side_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         ui.label(RichText::new("DEVICES").weak().small());
         ui.add_space(4.0);
 
         match &self.conn {
             Conn::Connecting => {
-                ui.spinner();
-                ui.label("connecting…");
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("connecting…");
+                });
             }
             Conn::Failed(e) => {
                 ui.colored_label(Color32::from_rgb(0xff, 0x6b, 0x6b), "no OpenRGB server");
@@ -185,18 +222,12 @@ impl RgbControl {
                 controllers, zones, ..
             } => {
                 for (i, c) in controllers.iter().enumerate() {
-                    let swatch = zones[i]
-                        .first()
-                        .map(|z| z.color)
-                        .unwrap_or([80, 80, 80]);
+                    let sw = zones[i].first().map(|z| z.color).unwrap_or([80, 80, 80]);
                     ui.horizontal(|ui| {
                         let (rect, _) =
                             ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-                        ui.painter().rect_filled(
-                            rect,
-                            2.0,
-                            Color32::from_rgb(swatch[0], swatch[1], swatch[2]),
-                        );
+                        ui.painter()
+                            .rect_filled(rect, 2.0, Color32::from_rgb(sw[0], sw[1], sw[2]));
                         if ui
                             .selectable_label(self.selected == i, short_name(&c.name))
                             .clicked()
@@ -208,7 +239,40 @@ impl RgbControl {
             }
         }
 
-        // Master brightness pinned to the bottom.
+        ui.add_space(12.0);
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("CUSTOM EFFECTS").weak().small());
+            if ui.small_button("+ New").clicked() {
+                self.editor = Some(EditorState {
+                    replacing: None,
+                    draft: CustomEffect::new_default(self.library.fresh_name()),
+                });
+            }
+        });
+        let names: Vec<String> = self.library.effects.iter().map(|e| e.name.clone()).collect();
+        for name in names {
+            ui.horizontal(|ui| {
+                if let Some(e) = self.library.get(&name) {
+                    let d = e.dominant();
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                    ui.painter()
+                        .rect_filled(rect, 2.0, Color32::from_rgb(d.0, d.1, d.2));
+                }
+                ui.label(RichText::new("★").color(CUST_HUE));
+                ui.label(&name);
+                if ui.small_button("edit").clicked() {
+                    if let Some(e) = self.library.get(&name) {
+                        self.editor = Some(EditorState {
+                            replacing: Some(name.clone()),
+                            draft: e.clone(),
+                        });
+                    }
+                }
+            });
+        }
+
         egui::TopBottomPanel::bottom("master")
             .frame(egui::Frame::none())
             .show_inside(ui, |ui| {
@@ -223,76 +287,195 @@ impl RgbControl {
             });
     }
 
-    fn editor(&mut self, ui: &mut egui::Ui, t: f32) {
+    // ---- central editor ----------------------------------------------------
+
+    fn editor_view(&mut self, ui: &mut egui::Ui, t: f32) {
         let sel = self.selected;
-        let (name, sources, frame) = match &self.conn {
-            Conn::Ready {
-                controllers, zones, ..
-            } if sel < controllers.len() => {
-                let srcs: Vec<ZoneSource> = zones[sel].iter().map(|z| z.to_source()).collect();
-                let mut f = render_plan(&srcs, &self.spread, t);
-                let m = self.master as f32 / 100.0;
-                for c in &mut f {
-                    *c = scale(*c, m);
-                }
-                (controllers[sel].name.clone(), srcs, f)
-            }
-            _ => {
-                ui.centered_and_justified(|ui| {
-                    ui.label("Connect to an OpenRGB server to edit lighting.");
-                });
-                return;
-            }
+        let n_dev = match &self.conn {
+            Conn::Ready { controllers, .. } => controllers.len(),
+            _ => 0,
+        };
+        if n_dev == 0 || sel >= n_dev {
+            ui.centered_and_justified(|ui| {
+                ui.label("Connect to an OpenRGB server to edit lighting.");
+            });
+            return;
+        }
+
+        let (dev_name, mode_names): (String, Vec<String>) = match &self.conn {
+            Conn::Ready { controllers, .. } => (
+                short_name(&controllers[sel].name),
+                controllers[sel]
+                    .mode_names()
+                    .iter()
+                    .filter(|m| !m.eq_ignore_ascii_case("direct"))
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
+            _ => (String::new(), Vec::new()),
         };
 
+        // Header + device-mode toggle.
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.heading(short_name(&name));
-            ui.label(
-                RichText::new(format!("· {} zones · clock {t:6.2}s", sources.len()))
-                    .weak()
-                    .monospace(),
+            ui.heading(dev_name);
+            ui.label(RichText::new(format!("· clock {t:6.2}s")).weak().monospace());
+        });
+        let is_hardware = matches!(self.dev_mode_of(sel), Some(DeviceMode::Hardware(_)));
+        ui.horizontal(|ui| {
+            if ui.selectable_label(!is_hardware, "  Per-Zone  ").clicked() && is_hardware {
+                self.set_dev_mode(sel, DeviceMode::PerZone);
+                self.dirty = true;
+            }
+            let hw_btn = ui.selectable_label(
+                is_hardware,
+                RichText::new("  Hardware effect · 0 CPU  ").color(if is_hardware {
+                    Color32::WHITE
+                } else {
+                    CORE_HUE
+                }),
             );
+            if hw_btn.clicked() && !is_hardware {
+                let mode = mode_names.first().cloned().unwrap_or_else(|| "STATIC".into());
+                self.set_dev_mode(
+                    sel,
+                    DeviceMode::Hardware(HwEffect {
+                        mode,
+                        color: [0x00, 0xE5, 0xFF],
+                        speed: 5,
+                        brightness: 100,
+                    }),
+                );
+                self.dirty = true;
+            }
         });
         ui.separator();
         ui.add_space(8.0);
 
-        let groups = shared_clock_groups(&sources);
+        if is_hardware {
+            self.hardware_panel(ui, sel, &mode_names);
+        } else {
+            self.per_zone_panels(ui, sel, t);
+        }
+    }
 
-        // Per-zone control panels, side by side; wrap to the next line if the
-        // window is too narrow to hold them all.
-        let n = sources.len();
-        egui::ScrollArea::horizontal().show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for zi in 0..n {
-                    self.zone_panel(ui, zi, frame.get(zi).copied().unwrap_or(Rgb(0, 0, 0)), &groups);
+    fn hardware_panel(&mut self, ui: &mut egui::Ui, sel: usize, mode_names: &[String]) {
+        let mut dirty = false;
+        if let Some(DeviceMode::Hardware(hw)) = self.dev_mode_of_mut(sel) {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_max_width(360.0);
+                ui.label(
+                    RichText::new("CORE effect — runs on the keyboard controller, no host CPU")
+                        .color(CORE_HUE)
+                        .small(),
+                );
+                ui.add_space(6.0);
+                egui::ComboBox::from_label("Effect")
+                    .selected_text(hw.mode.clone())
+                    .show_ui(ui, |ui| {
+                        for m in mode_names {
+                            if ui.selectable_value(&mut hw.mode, m.clone(), m).clicked() {
+                                dirty = true;
+                            }
+                        }
+                    });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("Color");
+                    if ui.color_edit_button_srgb(&mut hw.color).changed() {
+                        dirty = true;
+                    }
+                });
+                if ui
+                    .add(egui::Slider::new(&mut hw.speed, 1..=9).text("Speed"))
+                    .changed()
+                {
+                    dirty = true;
+                }
+                if ui
+                    .add(egui::Slider::new(&mut hw.brightness, 0..=100).suffix("%").text("Bright"))
+                    .changed()
+                {
+                    dirty = true;
                 }
             });
-        });
+        }
+        self.dirty |= dirty;
+    }
 
-        // Shared-clock strip: one row per ganged group with a Link/Spread toggle.
+    fn per_zone_panels(&mut self, ui: &mut egui::Ui, sel: usize, t: f32) {
+        // Snapshot the library (names + swatches) so we don't hold a borrow of
+        // it while mutating the zones.
+        let customs: Vec<(String, [u8; 3])> = self
+            .library
+            .effects
+            .iter()
+            .map(|e| {
+                let d = e.dominant();
+                (e.name.clone(), [d.0, d.1, d.2])
+            })
+            .collect();
+
+        // Build sources + the live preview frame (owned; no borrow held after).
+        let (sources, frame) = {
+            let m = self.master as f32 / 100.0;
+            match &self.conn {
+                Conn::Ready { zones, .. } => {
+                    let srcs: Vec<ZoneSource> =
+                        zones[sel].iter().map(|z| z.to_source(&self.library)).collect();
+                    let mut f = render_plan(&srcs, &self.spread, t);
+                    for c in &mut f {
+                        *c = scale(*c, m);
+                    }
+                    (srcs, f)
+                }
+                _ => (Vec::new(), Vec::new()),
+            }
+        };
+        let groups = shared_clock_groups(&sources);
+        let n = sources.len();
+
+        let mut local_dirty = false;
+        if let Conn::Ready { zones, .. } = &mut self.conn {
+            let zrow = &mut zones[sel];
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for zi in 0..n {
+                        let preview = frame.get(zi).copied().unwrap_or(Rgb(0, 0, 0));
+                        zone_panel(ui, zi, &mut zrow[zi], preview, &groups, &customs, &mut local_dirty);
+                    }
+                });
+            });
+        }
+        self.dirty |= local_dirty;
+
+        // Shared-clock strip with Link/Spread per group.
         if !groups.is_empty() {
             ui.add_space(10.0);
             ui.separator();
             ui.label(RichText::new("SHARED CLOCKS").weak().small());
-            for (effect, idxs) in &groups {
+            for g in &groups {
                 ui.horizontal(|ui| {
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                    ui.painter().circle_filled(rect.center(), 5.0, effect_hue(*effect));
+                    ui.painter().circle_filled(
+                        rect.center(),
+                        5.0,
+                        Color32::from_rgb(g.hue.0, g.hue.1, g.hue.2),
+                    );
                     ui.label(format!(
                         "{} · zones {}",
-                        effect.label(),
-                        idxs.iter().map(|i| (i + 1).to_string()).collect::<Vec<_>>().join(",")
+                        g.label,
+                        g.zones.iter().map(|i| (i + 1).to_string()).collect::<Vec<_>>().join(",")
                     ));
-                    let mut is_spread = self.spread.contains(effect);
-                    ui.selectable_value(&mut is_spread, false, "Link");
-                    ui.selectable_value(&mut is_spread, true, "Spread");
-                    if is_spread {
-                        if self.spread.insert(*effect) {
+                    let mut spread = self.spread.contains(&g.key);
+                    ui.selectable_value(&mut spread, false, "Link");
+                    ui.selectable_value(&mut spread, true, "Spread");
+                    if spread {
+                        if self.spread.insert(g.key.clone()) {
                             self.dirty = true;
                         }
-                    } else if self.spread.remove(effect) {
+                    } else if self.spread.remove(&g.key) {
                         self.dirty = true;
                     }
                 });
@@ -300,186 +483,212 @@ impl RgbControl {
         }
     }
 
-    fn zone_panel(
-        &mut self,
-        ui: &mut egui::Ui,
-        zi: usize,
-        preview: Rgb,
-        groups: &[(Effect, Vec<usize>)],
-    ) {
-        const W: f32 = 172.0;
+    // ---- effect editor window ----------------------------------------------
 
-        // Which shared-clock group (if any) this zone belongs to.
-        let group_effect = groups
-            .iter()
-            .find(|(_, idxs)| idxs.contains(&zi))
-            .map(|(e, _)| *e);
+    fn effect_editor_window(&mut self, ctx: &egui::Context, t: f32) {
+        let Some(mut ed) = self.editor.take() else {
+            return;
+        };
+        let mut keep_open = true;
+        let mut save = false;
+        let mut delete = false;
 
-        let mut frame = egui::Frame::group(ui.style())
-            .fill(ui.visuals().faint_bg_color)
-            .rounding(6.0)
-            .inner_margin(egui::Margin::same(8.0));
-        if let Some(e) = group_effect {
-            // A hue-tinted border ties ganged panels together at a glance.
-            frame = frame.stroke(egui::Stroke::new(1.5_f32, effect_hue(e)));
-        }
-
-        frame.show(ui, |ui| {
-            // Force a vertical stack — a Frame inherits the parent's (here
-            // horizontal) layout otherwise, which flings the controls sideways.
-            ui.vertical(|ui| {
-                ui.set_width(W);
-                ui.spacing_mut().slider_width = W - 64.0;
-
-                // Live preview header.
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(W, 44.0), egui::Sense::hover());
-                let pv = Color32::from_rgb(preview.0, preview.1, preview.2);
-                ui.painter().rect_filled(rect, 5.0, pv);
-                // Text color adapts to the preview's luminance so it stays legible.
-                let ink = if luminance(preview) > 0.55 {
-                    Color32::from_black_alpha(200)
-                } else {
-                    Color32::from_white_alpha(220)
-                };
-                ui.painter().text(
-                    rect.left_top() + egui::vec2(8.0, 6.0),
-                    egui::Align2::LEFT_TOP,
-                    format!("Zone {}", zi + 1),
-                    egui::FontId::proportional(13.0),
-                    ink,
-                );
-                if let Some(e) = group_effect {
-                    ui.painter().text(
-                        rect.left_bottom() + egui::vec2(8.0, -6.0),
-                        egui::Align2::LEFT_BOTTOM,
-                        format!("🔗 {}", e.label()),
-                        egui::FontId::proportional(11.0),
-                        ink,
-                    );
-                    ui.painter().circle_filled(
-                        rect.right_top() + egui::vec2(-10.0, 10.0),
-                        5.0,
-                        effect_hue(e),
-                    );
-                }
-
-                ui.add_space(8.0);
-
-                let Conn::Ready { zones, .. } = &mut self.conn else {
-                    return;
-                };
-                let z = &mut zones[self.selected][zi];
-
-                // Source toggle — full-width segmented pair.
-                ui.columns(2, |cols| {
-                    if cols[0]
-                        .selectable_label(z.source == Source::Solid, "  Solid  ")
-                        .clicked()
-                    {
-                        z.source = Source::Solid;
-                        self.dirty = true;
-                    }
-                    if cols[1]
-                        .selectable_label(z.source == Source::Function, "Function")
-                        .clicked()
-                    {
-                        z.source = Source::Function;
-                        self.dirty = true;
-                    }
+        egui::Window::new("Effect Editor")
+            .collapsible(false)
+            .resizable(false)
+            .default_width(340.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    ui.text_edit_singleline(&mut ed.draft.name);
                 });
+
+                egui::ComboBox::from_label("Motion")
+                    .selected_text(ed.draft.motion.label())
+                    .show_ui(ui, |ui| {
+                        for m in Motion::ALL {
+                            ui.selectable_value(&mut ed.draft.motion, m, m.label());
+                        }
+                    });
+
+                ui.add(egui::Slider::new(&mut ed.draft.speed, 0.1..=4.0).text("Speed"));
+                ui.add(egui::Slider::new(&mut ed.draft.brightness, 0.0..=1.0).text("Brightness"));
 
                 ui.add_space(6.0);
+                ui.label(RichText::new("Palette").weak().small());
+                let mut remove: Option<usize> = None;
+                let can_remove = ed.draft.palette.len() > 1;
+                for (i, stop) in ed.draft.palette.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.color_edit_button_srgb(&mut stop.rgb);
+                        ui.add(
+                            egui::Slider::new(&mut stop.pos, 0.0..=1.0)
+                                .fixed_decimals(2)
+                                .text("pos"),
+                        );
+                        if ui
+                            .add_enabled(can_remove, egui::Button::new("✕").small())
+                            .clicked()
+                        {
+                            remove = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = remove {
+                    ed.draft.palette.remove(i);
+                }
+                if ui.button("+ Add stop").clicked() {
+                    ed.draft.palette.push(ColorStop {
+                        pos: 1.0,
+                        rgb: [0xFF, 0xFF, 0xFF],
+                    });
+                }
+
+                // Live preview strip (16 cells).
+                ui.add_space(8.0);
+                ui.label(RichText::new("Preview").weak().small());
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(300.0, 26.0), egui::Sense::hover());
+                let cells = 16usize;
+                let colors = ed.draft.sample(t, cells, 1.0, 1.0);
+                let cw = rect.width() / cells as f32;
+                for (i, c) in colors.iter().enumerate() {
+                    let x = rect.left() + i as f32 * cw;
+                    let r = egui::Rect::from_min_size(
+                        egui::pos2(x, rect.top()),
+                        egui::vec2(cw + 1.0, rect.height()),
+                    );
+                    ui.painter().rect_filled(r, 0.0, Color32::from_rgb(c.0, c.1, c.2));
+                }
+
+                ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Color").weak());
-                    if ui.color_edit_button_srgb(&mut z.color).changed() {
-                        self.dirty = true;
+                    if ui.button("Save").clicked() {
+                        save = true;
+                        keep_open = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        keep_open = false;
+                    }
+                    if ed.replacing.is_some() && ui.button("Delete").clicked() {
+                        delete = true;
+                        keep_open = false;
                     }
                 });
-
-                if z.source == Source::Function {
-                    ui.add_space(6.0);
-                    ui.label(RichText::new("Effect").weak().small());
-                    egui::ComboBox::from_id_source(("effect", self.selected, zi))
-                        .width(W)
-                        .selected_text(z.effect.label())
-                        .show_ui(ui, |ui| {
-                            for e in Effect::ALL {
-                                if ui.selectable_value(&mut z.effect, e, e.label()).clicked() {
-                                    self.dirty = true;
-                                }
-                            }
-                        });
-                    ui.add_space(4.0);
-                    ui.label(RichText::new("Speed").weak().small());
-                    if ui
-                        .add(egui::Slider::new(&mut z.speed, 1..=9))
-                        .changed()
-                    {
-                        self.dirty = true;
-                    }
-                }
-
-                ui.add_space(4.0);
-                ui.label(RichText::new("Brightness").weak().small());
-                if ui
-                    .add(egui::Slider::new(&mut z.brightness, 0..=100).suffix("%"))
-                    .changed()
-                {
-                    self.dirty = true;
-                }
             });
-        });
-        ui.add_space(8.0);
+
+        if save && !ed.draft.name.trim().is_empty() {
+            // If renamed, drop the old entry first.
+            if let Some(old) = &ed.replacing {
+                if old != &ed.draft.name {
+                    self.library.remove(old);
+                }
+            }
+            self.library.upsert(ed.draft.clone());
+            self.dirty = true;
+        }
+        if delete {
+            if let Some(old) = &ed.replacing {
+                self.library.remove(old);
+                self.dirty = true;
+            }
+        }
+        if keep_open {
+            self.editor = Some(ed);
+        }
+        // Repaint keeps the preview animating.
     }
 
-    /// Returns whether anything is animating (needs continuous repaint).
-    ///
-    /// Cheap by construction: we only run at `PUSH_HZ` (or immediately on a user
-    /// change), each device enters Direct mode once, and a device is written
-    /// ONLY when its rendered frame differs from the last one pushed — so static
-    /// zones send nothing and idle devices stay silent.
+    // ---- device-mode helpers -----------------------------------------------
+
+    fn dev_mode_of(&self, i: usize) -> Option<&DeviceMode> {
+        match &self.conn {
+            Conn::Ready { dev_mode, .. } => dev_mode.get(i),
+            _ => None,
+        }
+    }
+    fn dev_mode_of_mut(&mut self, i: usize) -> Option<&mut DeviceMode> {
+        match &mut self.conn {
+            Conn::Ready { dev_mode, .. } => dev_mode.get_mut(i),
+            _ => None,
+        }
+    }
+    fn set_dev_mode(&mut self, i: usize, m: DeviceMode) {
+        if let Conn::Ready { dev_mode, .. } = &mut self.conn {
+            if let Some(slot) = dev_mode.get_mut(i) {
+                *slot = m;
+            }
+        }
+    }
+
+    // ---- hardware push -----------------------------------------------------
+
     fn push_if_due(&mut self, t: f32) -> bool {
+        let lib = &self.library;
+        let spread = &self.spread;
+        let master = self.master as f32 / 100.0;
+
         let Conn::Ready {
             client,
             controllers,
             zones,
+            dev_mode,
             direct_set,
+            applied_hw,
             last_frame,
         } = &mut self.conn
         else {
             return false;
         };
 
-        let animating = zones
-            .iter()
-            .flatten()
-            .any(|z| z.source == Source::Function);
+        let animating = dev_mode.iter().enumerate().any(|(i, m)| {
+            matches!(m, DeviceMode::PerZone)
+                && zones[i].iter().any(|z| !matches!(z.kind, Kind::Solid))
+        });
 
         let due = self.last_push.elapsed().as_secs_f32() >= 1.0 / PUSH_HZ;
-        // Nothing to do: not time for an animation tick and no pending edit.
         if !due && !self.dirty {
             return animating;
         }
 
-        let m = self.master as f32 / 100.0;
-        for (ci, ctrl) in controllers.iter().enumerate() {
-            let srcs: Vec<ZoneSource> = zones[ci].iter().map(|z| z.to_source()).collect();
-            let mut frame = render_plan(&srcs, &self.spread, t);
-            for c in &mut frame {
-                *c = scale(*c, m);
-            }
-            // Skip devices whose output hasn't moved since last push.
-            if frame == last_frame[ci] {
-                continue;
-            }
-            if !direct_set[ci] {
-                if client.enter_direct(ctrl).is_ok() {
-                    direct_set[ci] = true;
+        for ci in 0..controllers.len() {
+            match &dev_mode[ci] {
+                DeviceMode::Hardware(hw) => {
+                    let sig = hw.signature();
+                    if applied_hw[ci].as_deref() != Some(sig.as_str()) {
+                        let _ = client.apply_effect(
+                            &controllers[ci],
+                            &hw.mode,
+                            Rgb(hw.color[0], hw.color[1], hw.color[2]),
+                            Some(hw.speed),
+                            Some(hw.brightness),
+                        );
+                        applied_hw[ci] = Some(sig);
+                        // We left Direct mode; force re-entry if we go back.
+                        direct_set[ci] = false;
+                        last_frame[ci].clear();
+                    }
                 }
-            }
-            if client.update_leds(ctrl, &frame).is_ok() {
-                last_frame[ci] = frame;
+                DeviceMode::PerZone => {
+                    applied_hw[ci] = None;
+                    let srcs: Vec<ZoneSource> =
+                        zones[ci].iter().map(|z| z.to_source(lib)).collect();
+                    let mut frame = render_plan(&srcs, spread, t);
+                    for c in &mut frame {
+                        *c = scale(*c, master);
+                    }
+                    if frame == last_frame[ci] {
+                        continue;
+                    }
+                    if !direct_set[ci] {
+                        if client.enter_direct(&controllers[ci]).is_ok() {
+                            direct_set[ci] = true;
+                        }
+                    }
+                    if client.update_leds(&controllers[ci], &frame).is_ok() {
+                        last_frame[ci] = frame;
+                    }
+                }
             }
         }
         self.last_push = Instant::now();
@@ -488,8 +697,151 @@ impl RgbControl {
     }
 }
 
-/// Connect + enumerate on a worker thread; the window shows "connecting…" until
-/// it replies.
+/// One zone control card (free function so it borrows only the zone + a dirty
+/// flag, never `self`).
+fn zone_panel(
+    ui: &mut egui::Ui,
+    zi: usize,
+    z: &mut ZoneUi,
+    preview: Rgb,
+    groups: &[Group],
+    customs: &[(String, [u8; 3])],
+    dirty: &mut bool,
+) {
+    const W: f32 = 176.0;
+    let group_hue = groups
+        .iter()
+        .find(|g| g.zones.contains(&zi))
+        .map(|g| Color32::from_rgb(g.hue.0, g.hue.1, g.hue.2));
+
+    let mut frame = egui::Frame::group(ui.style())
+        .fill(ui.visuals().faint_bg_color)
+        .rounding(6.0)
+        .inner_margin(egui::Margin::same(8.0));
+    if let Some(h) = group_hue {
+        frame = frame.stroke(egui::Stroke::new(1.5_f32, h));
+    }
+
+    frame.show(ui, |ui| {
+        ui.vertical(|ui| {
+            ui.set_width(W);
+            ui.spacing_mut().slider_width = W - 70.0;
+
+            // Preview header.
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(W, 42.0), egui::Sense::hover());
+            ui.painter()
+                .rect_filled(rect, 5.0, Color32::from_rgb(preview.0, preview.1, preview.2));
+            let ink = if luminance(preview) > 0.55 {
+                Color32::from_black_alpha(200)
+            } else {
+                Color32::from_white_alpha(220)
+            };
+            ui.painter().text(
+                rect.left_top() + egui::vec2(8.0, 6.0),
+                egui::Align2::LEFT_TOP,
+                format!("Zone {}", zi + 1),
+                egui::FontId::proportional(13.0),
+                ink,
+            );
+            if let Some(h) = group_hue {
+                ui.painter()
+                    .circle_filled(rect.right_top() + egui::vec2(-10.0, 10.0), 5.0, h);
+            }
+
+            ui.add_space(8.0);
+
+            // Three-type selector, color-coded.
+            ui.horizontal(|ui| {
+                let is_solid = matches!(z.kind, Kind::Solid);
+                let is_prog = matches!(z.kind, Kind::Program(_));
+                let is_cust = matches!(z.kind, Kind::Custom(_));
+                if ui.selectable_label(is_solid, "Solid").clicked() && !is_solid {
+                    z.kind = Kind::Solid;
+                    *dirty = true;
+                }
+                if ui
+                    .selectable_label(is_prog, RichText::new("ƒ Prog").color(PROG_HUE))
+                    .clicked()
+                    && !is_prog
+                {
+                    z.kind = Kind::Program(Effect::Rainbow);
+                    *dirty = true;
+                }
+                if ui
+                    .selectable_label(is_cust, RichText::new("★ Custom").color(CUST_HUE))
+                    .clicked()
+                    && !is_cust
+                {
+                    z.kind = customs
+                        .first()
+                        .map(|(n, _)| Kind::Custom(n.clone()))
+                        .unwrap_or(Kind::Solid);
+                    *dirty = true;
+                }
+            });
+
+            ui.add_space(6.0);
+            match &mut z.kind {
+                Kind::Solid => {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Color").weak());
+                        if ui.color_edit_button_srgb(&mut z.color).changed() {
+                            *dirty = true;
+                        }
+                    });
+                }
+                Kind::Program(e) => {
+                    egui::ComboBox::from_id_source(("prog", zi))
+                        .width(W)
+                        .selected_text(e.label())
+                        .show_ui(ui, |ui| {
+                            for opt in Effect::ALL {
+                                if ui.selectable_value(e, opt, opt.label()).clicked() {
+                                    *dirty = true;
+                                }
+                            }
+                        });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Color").weak());
+                        if ui.color_edit_button_srgb(&mut z.color).changed() {
+                            *dirty = true;
+                        }
+                    });
+                }
+                Kind::Custom(name) => {
+                    egui::ComboBox::from_id_source(("cust", zi))
+                        .width(W)
+                        .selected_text(name.clone())
+                        .show_ui(ui, |ui| {
+                            for (n, _) in customs {
+                                if ui.selectable_value(name, n.clone(), n).clicked() {
+                                    *dirty = true;
+                                }
+                            }
+                        });
+                }
+            }
+
+            if !matches!(z.kind, Kind::Solid) {
+                ui.add_space(4.0);
+                ui.label(RichText::new("Speed").weak().small());
+                if ui.add(egui::Slider::new(&mut z.speed, 1..=9)).changed() {
+                    *dirty = true;
+                }
+            }
+            ui.add_space(4.0);
+            ui.label(RichText::new("Brightness").weak().small());
+            if ui
+                .add(egui::Slider::new(&mut z.brightness, 0..=100).suffix("%"))
+                .changed()
+            {
+                *dirty = true;
+            }
+        });
+    });
+    ui.add_space(8.0);
+}
+
 fn spawn_connect() -> mpsc::Receiver<ConnResult> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -503,7 +855,6 @@ fn spawn_connect() -> mpsc::Receiver<ConnResult> {
     rx
 }
 
-/// Trim OpenRGB's verbose "AcerHIDKeyboard Device" to something readable.
 fn short_name(name: &str) -> String {
     name.trim_end_matches(" Device")
         .replace("AcerHID", "")
@@ -513,21 +864,6 @@ fn short_name(name: &str) -> String {
         .to_string()
 }
 
-/// Perceptual-ish luminance in 0..=1, for picking legible text over a swatch.
 fn luminance(c: Rgb) -> f32 {
     (0.299 * c.0 as f32 + 0.587 * c.1 as f32 + 0.114 * c.2 as f32) / 255.0
-}
-
-/// Per-effect hue for the shared-clock badges (matches the mockup tokens).
-fn effect_hue(e: Effect) -> Color32 {
-    let (r, g, b) = match e {
-        Effect::Comet => (0x1f, 0xb7, 0xa6),
-        Effect::Fire => (0xff, 0x95, 0x00),
-        Effect::Rainbow => (0xd8, 0x4b, 0xff),
-        Effect::Breathe => (0x5e, 0x5c, 0xe6),
-        Effect::Wave => (0x34, 0xc0, 0xff),
-        Effect::Police => (0xff, 0x3b, 0x4e),
-        Effect::Gradient => (0x4b, 0xbf, 0x73),
-    };
-    Color32::from_rgb(r, g, b)
 }
