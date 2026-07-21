@@ -1,0 +1,17 @@
+colormemuch write matrix — epoch 1784594014
+3 shots, ~3s apart. gmOutput is the key column:
+a code that differs from the known-rejected 0x1 is the one to trust.
+
+[0] t+0s  confirm RED
+    SetGamingKBBacklight <- [01 04 64 00 01 FF 00 00 00 01 00 00 00 00 00 00] (16 bytes)
+    gmOutput = 0x0
+
+[1] t+3s  confirm GREEN
+    SetGamingKBBacklight <- [01 04 64 00 01 00 FF 00 00 01 00 00 00 00 00 00] (16 bytes)
+    gmOutput = 0x0
+
+[2] t+6s  confirm BLUE
+    SetGamingKBBacklight <- [01 04 64 00 01 00 00 FF 00 01 00 00 00 00 00 00] (16 bytes)
+    gmOutput = 0x0
+
+done — note WHICH step (if any) turned the keyboard green and whether it stuck.
