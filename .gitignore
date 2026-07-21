@@ -1,3 +1,8 @@
 /target
 *.msi
 *.log
+
+# Transient hardware-write reports from the #[ignore]d rgb tests. The probe
+# baselines (probe-*.txt) are committed on purpose; these are throwaway results
+# meant to be pasted back, not versioned.
+kbwrite-*.txt

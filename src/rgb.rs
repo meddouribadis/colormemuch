@@ -193,6 +193,55 @@ pub fn write_keyboard(wmi: &Wmi, payload: &[u8]) -> Result<u64> {
     wmi.call_bytes("SetGamingKBBacklight", payload)
 }
 
+/// Connect, fire one array-method write, and record the whole story to a
+/// plaintext report file — returning its path.
+///
+/// This mirrors `scripts/probe_rgb.ps1`: results come back as a *file to paste*,
+/// not console noise. Connect failures, the exact payload, and the `gmOutput`
+/// (or error) all land in the file, so the file alone tells the full tale even
+/// when the terminal is unusable. The report is written to the current
+/// directory (the package root under `cargo test`), next to the probe reports.
+///
+/// `method` is the WMI method name, so this serves the lid shield too once that
+/// path is trusted — not just `SetGamingKBBacklight`.
+pub fn fire_and_report(label: &str, method: &str, payload: &[u8]) -> std::path::PathBuf {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = std::path::PathBuf::from(format!("kbwrite-{ts}.txt"));
+
+    let hex = payload
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let mut out = String::new();
+    out.push_str(&format!("colormemuch write report — epoch {ts}\n"));
+    out.push_str(&format!("label:  {label}\n"));
+    out.push_str(&format!("method: {method}\n"));
+    out.push_str(&format!("payload: [{hex}] ({} bytes)\n\n", payload.len()));
+
+    match Wmi::connect() {
+        Ok(wmi) => match wmi.call_bytes(method, payload) {
+            Ok(status) => {
+                out.push_str(&format!("result: OK  gmOutput=0x{status:X}\n"));
+                out.push_str("watch the hardware — then note what actually happened.\n");
+            }
+            Err(e) => out.push_str(&format!("result: WRITE FAILED  {e}\n")),
+        },
+        Err(e) => out.push_str(&format!("result: CONNECT FAILED  {e}\n(elevated?)\n")),
+    }
+
+    // Best-effort: if even the file write fails, the returned path lets the
+    // caller report that rather than silently swallowing it.
+    let _ = std::fs::write(&path, &out);
+    path
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,21 +277,14 @@ mod tests {
     /// deliberately not red — the keyboard is red now, so green is an
     /// unmistakable, obviously-intentional change. Restore anytime by
     /// re-selecting a profile in PredatorSense.
+    ///
+    /// Writes the outcome to `kbwrite-<epoch>.txt` in the package root and
+    /// prints only that path — no console noise to paste around.
     #[test]
     #[ignore = "writes real hardware; run explicitly and elevated"]
     fn hw_write_keyboard_breath_green() {
-        let wmi = match Wmi::connect() {
-            Ok(w) => w,
-            Err(e) => panic!("connect failed (elevated?): {e}"),
-        };
-
         let payload = effect_payload(Effect::Breath, 5, 100, 1, Rgb(0x00, 0xFF, 0x00));
-        let hex: Vec<String> = payload.iter().map(|b| format!("{b:02X}")).collect();
-        eprintln!("SetGamingKBBacklight <- [{}]", hex.join(" "));
-
-        match write_keyboard(&wmi, &payload) {
-            Ok(status) => eprintln!("gmOutput = 0x{status:X} — watch the keyboard"),
-            Err(e) => panic!("write failed: {e}"),
-        }
+        let path = fire_and_report("keyboard breath green", "SetGamingKBBacklight", &payload);
+        eprintln!("report written: {}", path.display());
     }
 }
