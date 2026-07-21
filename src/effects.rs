@@ -210,6 +210,84 @@ pub fn play(
     Ok(())
 }
 
+// --- per-zone sources on a shared clock -----------------------------------
+
+/// What drives a single zone: a fixed color, or a function (effect + params).
+#[derive(Debug, Clone, Copy)]
+pub enum ZoneSource {
+    Solid(Rgb),
+    Function(Effect, Params),
+}
+
+impl ZoneSource {
+    /// The effect a zone runs, if any — used to tell which zones share a clock.
+    pub fn effect(&self) -> Option<Effect> {
+        match self {
+            ZoneSource::Solid(_) => None,
+            ZoneSource::Function(e, _) => Some(*e),
+        }
+    }
+}
+
+/// Sample one zone (a single LED) at shared-clock time `t`.
+pub fn render_zone(src: &ZoneSource, t: f32) -> Rgb {
+    match src {
+        ZoneSource::Solid(c) => *c,
+        ZoneSource::Function(e, p) => render(*e, *p, t, 1)[0],
+    }
+}
+
+/// Render a whole multi-zone frame from ONE shared clock value `t`.
+///
+/// The shared clock is the whole point: every zone samples the *same* `t`, so
+/// two zones running the same function are phase-locked — they move as one, no
+/// drift, regardless of when each was assigned. Give a zone a different effect
+/// (or Solid) and it simply reads the same clock independently. There are no
+/// per-zone timers to fall out of sync.
+pub fn render_zones(zones: &[ZoneSource], t: f32) -> Vec<Rgb> {
+    zones.iter().map(|z| render_zone(z, t)).collect()
+}
+
+/// Which zone indices are ganged to a shared clock: groups of ≥2 zones running
+/// the same effect. Handy for the UI's "link" affordance.
+pub fn shared_clock_groups(zones: &[ZoneSource]) -> Vec<(Effect, Vec<usize>)> {
+    let mut out: Vec<(Effect, Vec<usize>)> = Vec::new();
+    for (i, z) in zones.iter().enumerate() {
+        if let Some(e) = z.effect() {
+            match out.iter_mut().find(|(fe, _)| *fe == e) {
+                Some((_, idxs)) => idxs.push(i),
+                None => out.push((e, vec![i])),
+            }
+        }
+    }
+    out.retain(|(_, idxs)| idxs.len() >= 2);
+    out
+}
+
+/// Animate independently-assigned zones off one shared clock. Each zone can run
+/// its own source; same-function zones stay phase-locked because they all read
+/// this loop's single `t`.
+pub fn play_zones(
+    client: &mut OpenRgb,
+    ctrl: &Controller,
+    zones: &[ZoneSource],
+    secs: f32,
+    fps: u32,
+) -> std::io::Result<()> {
+    let frame_dt = std::time::Duration::from_secs_f32(1.0 / fps.max(1) as f32);
+    let start = std::time::Instant::now();
+    loop {
+        let t = start.elapsed().as_secs_f32();
+        if t >= secs {
+            break;
+        }
+        let frame = render_zones(zones, t);
+        client.set_leds(ctrl, &frame)?;
+        std::thread::sleep(frame_dt);
+    }
+    Ok(())
+}
+
 // --- color helpers --------------------------------------------------------
 
 /// Scale an RGB by a 0..=1 factor (gamma-naive, good enough for LEDs).
@@ -285,6 +363,28 @@ mod tests {
         assert_eq!(hsv(2.0 / 3.0, 1.0, 1.0), Rgb(0, 0, 255));
     }
 
+    #[test]
+    fn same_function_zones_share_one_clock() {
+        // Zones 0 and 2 both run Rainbow: on the shared clock they must be
+        // byte-identical at every instant (phase-locked). Zone 1 differs.
+        let zones = [
+            ZoneSource::Function(Effect::Rainbow, Params::default()),
+            ZoneSource::Function(Effect::Comet, Params::default()),
+            ZoneSource::Function(Effect::Rainbow, Params::default()),
+            ZoneSource::Solid(Rgb(10, 20, 30)),
+        ];
+        for &t in &[0.0f32, 0.37, 1.9, 5.5] {
+            let f = render_zones(&zones, t);
+            assert_eq!(f[0], f[2], "same-effect zones must be phase-locked at t={t}");
+        }
+        assert_eq!(render_zone(&zones[3], 99.0), Rgb(10, 20, 30));
+
+        let groups = shared_clock_groups(&zones);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, Effect::Rainbow);
+        assert_eq!(groups[0].1, vec![0, 2]);
+    }
+
     /// Live demo against the running OpenRGB server — plays a few software
     /// effects on the keyboard. No elevation. Ignored so CI skips it.
     ///
@@ -302,5 +402,33 @@ mod tests {
             eprintln!("playing {}", e.label());
             play(&mut c, &kb, e, Params::default(), 4.0, 30).expect("play");
         }
+    }
+
+    /// Live demo of INDEPENDENT per-zone control on a shared clock: zones 0 & 2
+    /// run Rainbow (phase-locked, identical), zone 1 runs Comet, zone 3 is a
+    /// solid color. No elevation.
+    ///
+    /// ```text
+    /// cargo test --bin colormemuch -- --ignored --exact \
+    ///     effects::tests::hw_play_zones_demo --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs the local OpenRGB server; animates the keyboard"]
+    fn hw_play_zones_demo() {
+        use crate::openrgb::OpenRgb;
+        let mut c = OpenRgb::connect().expect("connect");
+        let kb = c.find("keyboard").expect("query").expect("keyboard");
+        let p = Params::default();
+        let zones = [
+            ZoneSource::Function(Effect::Rainbow, p),
+            ZoneSource::Function(Effect::Comet, p),
+            ZoneSource::Function(Effect::Rainbow, p),
+            ZoneSource::Solid(Rgb(0xFF, 0x30, 0x00)),
+        ];
+        eprintln!(
+            "zones: [Rainbow, Comet, Rainbow, Solid] — 0&2 share a clock: {:?}",
+            shared_clock_groups(&zones)
+        );
+        play_zones(&mut c, &kb, &zones, 10.0, 30).expect("play zones");
     }
 }
