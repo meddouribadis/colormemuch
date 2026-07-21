@@ -1,0 +1,374 @@
+<!--
+=====================================================================
+  colormemuch — egui/eframe UI mockup (DARK theme)
+  Static HTML approximation of the immediate-mode egui main window.
+  Target proportions ~1100x720. All CSS inline. No external resources.
+=====================================================================
+
+  DESIGN TOKENS
+  -------------------------------------------------------------------
+  accent (teal)          #1fb7a6   (SelectableLabel active fill,
+                                     slider grab + trail, focus ring)
+  accent-hover           #29ccb9
+  accent-dim             rgba(31,183,166,0.18)  (selected row bg tint)
+  window fill            #1b1b1b   (CentralPanel background)
+  panel fill             #242424   (Side/Top panels)
+  faint bg               #2b2b2b   (grouped boxes, cards, inactive widget)
+  extreme bg             #101013   (slider rail, text edit, preview well)
+  widget bg (button)     #333338
+  widget hover           #3d3d44
+  stroke / separator     #3a3a3d   (1px hairlines, group borders)
+  text strong            #e8e8ea
+  text normal            #c4c4c8
+  text weak              #8a8a90
+  text faint             #66666c
+  ok-green (status dot)  #4bbf73
+  rounding               4px (widgets), 3px (small chips), 6px (cards)
+  spacing scale          item_spacing 8px; button padding 8x4;
+                         panel inner margin 10px; grid row gap 6px
+  font                   egui default is a clean sans (Ubuntu-ish);
+                         monospace (#c4c4c8) used for numeric values.
+
+  EGUI REGION -> WIDGET MAPPING
+  -------------------------------------------------------------------
+  Menu bar (File/View/Help) ...... egui::menu::bar in a TopBottomPanel::top,
+                                    each menu = ui.menu_button(...).
+  Left device list ............... SidePanel::left; each device row is a
+                                    SelectableLabel inside a horizontal
+                                    layout with a custom-painted swatch
+                                    (Painter::rect_filled) + label text.
+  Master brightness (left btm) ... Slider::new(..).range(0..=100)
+                                    .suffix("%") pinned under a Separator.
+  Central editor header .......... Heading label + a small painted swatch.
+  4-zone keyboard preview ........ CentralPanel custom Painter: 4 rounded
+                                    rects (rect_filled + rect_stroke for the
+                                    selected zone) laid out in a horizontal
+                                    allocate_exact_size response; click hit-
+                                    test selects the zone.
+  Zone color picker .............. color_edit_button_srgb(&mut [u8;3]) per
+                                    zone, shown in an egui::Grid; disabled
+                                    (add_enabled=false) unless mode is
+                                    Direct/Static.
+  Mode selector .................. ComboBox::from_label("Mode") OR a wrap
+                                    of SelectableLabels; capability-driven.
+  Speed / Brightness sliders ..... Slider range 1..=9 (kbd) / 1..=5 (logo)
+                                    + 0..=100 suffix "%"; shown via
+                                    ui.add_enabled_ui / conditional add so
+                                    they appear/hide with mode capability.
+  Custom Effects gallery ......... ScrollArea::horizontal over a row of
+                                    grouped "cards"; each card = a Frame
+                                    (faint bg, rounding 6) with a painted
+                                    thumbnail + label + a Play/Stop Button
+                                    and a small speed Slider/DragValue.
+  Status line (bottom) ........... TopBottomPanel::bottom with a painted
+                                    status dot + weak-text label.
+  Light variant note ............. swap window #1b1b1b->#f4f4f5,
+                                    panel #242424->#e8e8ea, text strong
+                                    #e8e8ea->#1b1b1b, extreme #101013->#fff,
+                                    keep accent #1fb7a6 (darken hover to
+                                    #159a8b for contrast on light rails).
+=====================================================================
+-->
+<meta charset="utf-8">
+<title>colormemuch — UI mockup</title>
+<style>
+  :root{
+    --accent:#1fb7a6; --accent-hover:#29ccb9; --accent-dim:rgba(31,183,166,0.18);
+    --win:#1b1b1b; --panel:#242424; --faint:#2b2b2b; --extreme:#101013;
+    --wbtn:#333338; --whover:#3d3d44; --stroke:#3a3a3d;
+    --t-strong:#e8e8ea; --t:#c4c4c8; --t-weak:#8a8a90; --t-faint:#66666c;
+    --ok:#4bbf73;
+    --r:4px; --rs:3px; --rc:6px;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;height:100%;background:#0d0d0f;
+    font-family:"Segoe UI",Ubuntu,"Helvetica Neue",Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;}
+  .mono{font-family:"Cascadia Mono",Consolas,"SF Mono",monospace;}
+
+  .win{width:1100px;height:720px;margin:24px auto;background:var(--win);
+    border:1px solid #000;border-radius:6px;overflow:hidden;
+    display:flex;flex-direction:column;color:var(--t);font-size:13px;
+    box-shadow:0 0 0 1px #2a2a2a;}
+
+  /* ---- menu bar ---- */
+  .menubar{background:var(--panel);border-bottom:1px solid var(--stroke);
+    display:flex;align-items:center;height:30px;padding:0 6px;gap:2px;
+    user-select:none;}
+  .menubar .m{padding:3px 9px;border-radius:var(--r);color:var(--t);}
+  .menubar .m:hover{background:var(--whover);color:var(--t-strong);}
+  .menubar .title{margin-left:auto;color:var(--t-faint);font-size:12px;
+    padding-right:8px;letter-spacing:.3px;}
+  .menubar .title b{color:var(--accent);font-weight:600;}
+
+  /* ---- main split ---- */
+  .body{flex:1;display:flex;min-height:0;}
+
+  /* ---- left device panel ---- */
+  .side{width:220px;background:var(--panel);border-right:1px solid var(--stroke);
+    display:flex;flex-direction:column;padding:10px 8px;gap:2px;}
+  .side .cap{color:var(--t-weak);font-size:11px;text-transform:uppercase;
+    letter-spacing:.6px;padding:2px 6px 6px;}
+  .devrow{display:flex;align-items:center;gap:9px;padding:7px 8px;
+    border-radius:var(--r);cursor:pointer;color:var(--t);}
+  .devrow:hover{background:var(--whover);}
+  .devrow.sel{background:var(--accent-dim);
+    box-shadow:inset 2px 0 0 var(--accent);color:var(--t-strong);}
+  .swatch{width:16px;height:16px;border-radius:var(--rs);
+    border:1px solid rgba(255,255,255,.15);flex:none;}
+  .devrow .meta{display:flex;flex-direction:column;line-height:1.25;}
+  .devrow .meta small{color:var(--t-weak);font-size:11px;}
+
+  .side .sep{height:1px;background:var(--stroke);margin:10px 4px;}
+  .master{padding:2px 6px;margin-top:auto;}
+  .master label{display:flex;justify-content:space-between;color:var(--t-weak);
+    font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px;}
+
+  /* ---- generic egui slider ---- */
+  .slider{display:flex;align-items:center;gap:10px;margin:6px 0;}
+  .slider .lab{width:78px;color:var(--t);flex:none;}
+  .rail{position:relative;flex:1;height:14px;display:flex;align-items:center;}
+  .rail .track{position:absolute;left:0;right:0;height:4px;background:var(--extreme);
+    border-radius:2px;border:1px solid #000;}
+  .rail .fill{position:absolute;left:0;height:4px;background:var(--accent);
+    border-radius:2px;}
+  .rail .grab{position:absolute;width:12px;height:14px;border-radius:var(--rs);
+    background:var(--accent);transform:translateX(-6px);
+    box-shadow:0 0 0 1px rgba(0,0,0,.4);}
+  .slider .val{width:52px;text-align:right;color:var(--t-strong);flex:none;
+    font-size:12px;}
+
+  /* ---- central editor ---- */
+  .central{flex:1;min-width:0;display:flex;flex-direction:column;
+    padding:14px 18px;overflow:hidden;}
+  .h1{display:flex;align-items:center;gap:10px;color:var(--t-strong);
+    font-size:18px;font-weight:600;}
+  .h1 .swatch{width:18px;height:18px;}
+  .h1 small{margin-left:6px;color:var(--t-weak);font-size:12px;font-weight:400;}
+  .sub{color:var(--t-weak);font-size:12px;margin:3px 0 12px;}
+
+  .group{background:var(--faint);border:1px solid var(--stroke);
+    border-radius:var(--r);padding:12px 14px;margin-bottom:14px;}
+  .group .gt{color:var(--t-weak);font-size:11px;text-transform:uppercase;
+    letter-spacing:.6px;margin-bottom:10px;}
+
+  /* keyboard 4-zone preview */
+  .kbwell{background:var(--extreme);border:1px solid #000;border-radius:var(--r);
+    padding:12px;display:flex;gap:8px;}
+  .zone{flex:1;height:82px;border-radius:var(--r);position:relative;
+    display:flex;align-items:flex-end;justify-content:center;cursor:pointer;
+    border:1px solid rgba(0,0,0,.4);}
+  .zone.sel{outline:2px solid var(--accent);outline-offset:2px;}
+  .zone .zl{font-size:11px;color:rgba(0,0,0,.62);font-weight:700;
+    padding-bottom:6px;letter-spacing:.5px;}
+  .zdots{position:absolute;inset:8px 8px 20px;display:grid;
+    grid-template-columns:repeat(6,1fr);grid-auto-rows:1fr;gap:3px;opacity:.28;}
+  .zdots i{background:#000;border-radius:2px;}
+
+  /* zone color grid */
+  .zgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:12px;}
+  .zpick{display:flex;align-items:center;gap:8px;color:var(--t-weak);font-size:11px;}
+  .colbtn{width:26px;height:20px;border-radius:var(--rs);
+    border:1px solid rgba(255,255,255,.18);cursor:pointer;flex:none;}
+  .zgrid.disabled{opacity:.42;pointer-events:none;}
+
+  /* mode selector */
+  .modes{display:flex;flex-wrap:wrap;gap:6px;}
+  .chip{padding:5px 11px;border-radius:var(--r);background:var(--wbtn);
+    border:1px solid var(--stroke);color:var(--t);cursor:pointer;font-size:12px;}
+  .chip:hover{background:var(--whover);color:var(--t-strong);}
+  .chip.sel{background:var(--accent);border-color:var(--accent);color:#08201d;
+    font-weight:600;}
+
+  .paramrow{display:flex;gap:26px;margin-top:12px;}
+  .paramrow .slider{flex:1;margin:0;}
+
+  /* custom effects gallery */
+  .cards{display:flex;gap:12px;overflow-x:auto;padding-bottom:4px;}
+  .cards::-webkit-scrollbar{height:8px;}
+  .cards::-webkit-scrollbar-thumb{background:var(--wbtn);border-radius:4px;}
+  .card{flex:none;width:150px;background:var(--faint);border:1px solid var(--stroke);
+    border-radius:var(--rc);padding:9px;display:flex;flex-direction:column;gap:8px;}
+  .card.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent);}
+  .thumb{height:60px;border-radius:var(--r);border:1px solid #000;}
+  .card .cn{color:var(--t-strong);font-size:12px;font-weight:600;}
+  .card .cr{display:flex;align-items:center;gap:8px;}
+  .btn{padding:4px 10px;border-radius:var(--r);background:var(--wbtn);
+    border:1px solid var(--stroke);color:var(--t-strong);cursor:pointer;font-size:12px;}
+  .btn:hover{background:var(--whover);}
+  .btn.play{background:var(--accent);border-color:var(--accent);color:#08201d;
+    font-weight:600;}
+  .btn.stop{color:#e0a3a3;}
+  .mini-rail{position:relative;flex:1;height:12px;display:flex;align-items:center;}
+  .mini-rail .track{position:absolute;left:0;right:0;height:3px;background:var(--extreme);
+    border-radius:2px;}
+  .mini-rail .fill{position:absolute;left:0;height:3px;background:var(--accent);border-radius:2px;}
+  .mini-rail .grab{position:absolute;width:9px;height:12px;border-radius:2px;
+    background:var(--accent);transform:translateX(-4px);}
+
+  /* status bar */
+  .status{background:var(--panel);border-top:1px solid var(--stroke);height:26px;
+    display:flex;align-items:center;padding:0 12px;gap:8px;color:var(--t-weak);
+    font-size:12px;}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);
+    box-shadow:0 0 5px var(--ok);flex:none;}
+  .status .r{margin-left:auto;color:var(--t-faint);}
+</style>
+
+<div class="win">
+
+  <!-- MENU BAR -->
+  <div class="menubar">
+    <div class="m">File</div>
+    <div class="m">View</div>
+    <div class="m">Help</div>
+    <div class="title">colormemuch <b>·</b> Predator Helios Neo 16S AI</div>
+  </div>
+
+  <div class="body">
+
+    <!-- LEFT DEVICE PANEL -->
+    <div class="side">
+      <div class="cap">Devices</div>
+
+      <div class="devrow sel">
+        <span class="swatch" style="background:linear-gradient(90deg,#ff2d55 0 25%,#ff9500 25% 50%,#1fb7a6 50% 75%,#5e5ce6 75% 100%)"></span>
+        <span class="meta">Keyboard<small>4 zones</small></span>
+      </div>
+
+      <div class="devrow">
+        <span class="swatch" style="background:#1fb7a6"></span>
+        <span class="meta">Cover Logo<small>shield · 1 LED</small></span>
+      </div>
+
+      <div class="devrow">
+        <span class="swatch" style="background:#ff9500"></span>
+        <span class="meta">Mode-Key LED<small>1 LED</small></span>
+      </div>
+
+      <div class="sep"></div>
+
+      <div class="master">
+        <label><span>Master brightness</span><span class="mono">82%</span></label>
+        <div class="rail">
+          <div class="track"></div>
+          <div class="fill" style="width:82%"></div>
+          <div class="grab" style="left:82%"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CENTRAL EDITOR -->
+    <div class="central">
+      <div class="h1">
+        <span class="swatch" style="background:linear-gradient(90deg,#ff2d55 0 25%,#ff9500 25% 50%,#1fb7a6 50% 75%,#5e5ce6 75% 100%)"></span>
+        Keyboard <small>OpenRGB · Acer 4-Zone</small>
+      </div>
+      <div class="sub">4 addressable zones · left → right · per-zone color in Direct/Static</div>
+
+      <!-- preview + zone colors -->
+      <div class="group">
+        <div class="gt">Zone preview — click a zone to select</div>
+        <div class="kbwell">
+          <div class="zone sel" style="background:#ff2d55">
+            <div class="zdots"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+            <span class="zl">ZONE 1</span>
+          </div>
+          <div class="zone" style="background:#ff9500">
+            <div class="zdots"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+            <span class="zl">ZONE 2</span>
+          </div>
+          <div class="zone" style="background:#1fb7a6">
+            <div class="zdots"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+            <span class="zl">ZONE 3</span>
+          </div>
+          <div class="zone" style="background:#5e5ce6">
+            <div class="zdots"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+            <span class="zl">ZONE 4</span>
+          </div>
+        </div>
+
+        <div class="zgrid">
+          <div class="zpick"><span class="colbtn" style="background:#ff2d55"></span>Zone 1</div>
+          <div class="zpick"><span class="colbtn" style="background:#ff9500"></span>Zone 2</div>
+          <div class="zpick"><span class="colbtn" style="background:#1fb7a6"></span>Zone 3</div>
+          <div class="zpick"><span class="colbtn" style="background:#5e5ce6"></span>Zone 4</div>
+        </div>
+      </div>
+
+      <!-- mode + params -->
+      <div class="group">
+        <div class="gt">Hardware mode</div>
+        <div class="modes">
+          <div class="chip sel">Direct</div>
+          <div class="chip">Static</div>
+          <div class="chip">Breathing</div>
+          <div class="chip">Neon</div>
+          <div class="chip">Wave</div>
+          <div class="chip">Shifting</div>
+          <div class="chip">Zoom</div>
+          <div class="chip">Meteor</div>
+          <div class="chip">Twinkling</div>
+        </div>
+
+        <div class="paramrow">
+          <div class="slider">
+            <span class="lab">Speed</span>
+            <div class="rail"><div class="track"></div><div class="fill" style="width:44%"></div><div class="grab" style="left:44%"></div></div>
+            <span class="val mono">4 / 9</span>
+          </div>
+          <div class="slider">
+            <span class="lab">Brightness</span>
+            <div class="rail"><div class="track"></div><div class="fill" style="width:75%"></div><div class="grab" style="left:75%"></div></div>
+            <span class="val mono">75%</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- custom effects -->
+      <div class="group" style="margin-bottom:0">
+        <div class="gt">Custom effects — animated by colormemuch</div>
+        <div class="cards">
+          <div class="card sel">
+            <div class="thumb" style="background:linear-gradient(90deg,#ff2d55,#ff9500,#ffe600,#4bbf73,#1fb7a6,#5e5ce6,#ff2d55)"></div>
+            <div class="cn">Rainbow Cycle</div>
+            <div class="cr"><span class="btn stop">Stop</span>
+              <div class="mini-rail"><div class="track"></div><div class="fill" style="width:60%"></div><div class="grab" style="left:60%"></div></div></div>
+          </div>
+          <div class="card">
+            <div class="thumb" style="background:radial-gradient(circle at 20% 50%,#1fb7a6,transparent 40%),#101013"></div>
+            <div class="cn">Comet / Scanner</div>
+            <div class="cr"><span class="btn play">Play</span>
+              <div class="mini-rail"><div class="track"></div><div class="fill" style="width:45%"></div><div class="grab" style="left:45%"></div></div></div>
+          </div>
+          <div class="card">
+            <div class="thumb" style="background:radial-gradient(ellipse at 50% 60%,#5e5ce6,#1b1b1b 70%)"></div>
+            <div class="cn">Breathing</div>
+            <div class="cr"><span class="btn play">Play</span>
+              <div class="mini-rail"><div class="track"></div><div class="fill" style="width:30%"></div><div class="grab" style="left:30%"></div></div></div>
+          </div>
+          <div class="card">
+            <div class="thumb" style="background:linear-gradient(0deg,#ff2d55,#ff9500 55%,#ffe600 90%)"></div>
+            <div class="cn">Fire</div>
+            <div class="cr"><span class="btn play">Play</span>
+              <div class="mini-rail"><div class="track"></div><div class="fill" style="width:70%"></div><div class="grab" style="left:70%"></div></div></div>
+          </div>
+          <div class="card">
+            <div class="thumb" style="background:linear-gradient(90deg,#5e5ce6,#1fb7a6)"></div>
+            <div class="cn">Gradient</div>
+            <div class="cr"><span class="btn play">Play</span>
+              <div class="mini-rail"><div class="track"></div><div class="fill" style="width:50%"></div><div class="grab" style="left:50%"></div></div></div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- STATUS BAR -->
+  <div class="status">
+    <span class="dot"></span>Connected to OpenRGB server · 127.0.0.1:6742 · 3 devices
+    <span class="r mono">v0.1.0 · Direct mode · applied live</span>
+  </div>
+
+</div>

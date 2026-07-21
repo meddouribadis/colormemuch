@@ -35,7 +35,9 @@ const SET_CLIENT_NAME: u32 = 50;
 const REQUEST_CONTROLLER_COUNT: u32 = 0;
 const REQUEST_CONTROLLER_DATA: u32 = 1;
 const UPDATE_LEDS: u32 = 1050;
+const UPDATE_ZONE_LEDS: u32 = 1051;
 const SET_CUSTOM_MODE: u32 = 1053;
+const UPDATE_MODE: u32 = 1100;
 
 /// Protocol version we advertise when requesting controller data. v4 matches the
 /// blob layout parsed below.
@@ -52,10 +54,95 @@ pub struct Controller {
     pub name: String,
     pub vendor: String,
     pub description: String,
-    pub modes: Vec<String>,
+    pub modes: Vec<Mode>,
     /// `(zone name, led count)`.
     pub zones: Vec<(String, u32)>,
     pub led_count: u16,
+}
+
+impl Controller {
+    pub fn mode_names(&self) -> Vec<&str> {
+        self.modes.iter().map(|m| m.name.as_str()).collect()
+    }
+    pub fn mode(&self, name: &str) -> Option<&Mode> {
+        let n = name.to_lowercase();
+        self.modes.iter().find(|m| m.name.to_lowercase() == n)
+    }
+}
+
+/// A hardware effect, with its tunable ranges and current parameters. Effects
+/// like Breathing/Wave/Neon are firmware functions: set one via [`OpenRgb::
+/// apply_effect`] and the controller animates it on its own, no host frames.
+#[derive(Debug, Clone)]
+pub struct Mode {
+    pub index: u32,
+    pub name: String,
+    pub value: i32,
+    pub flags: u32,
+    pub speed_min: u32,
+    pub speed_max: u32,
+    pub brightness_min: u32,
+    pub brightness_max: u32,
+    pub colors_min: u32,
+    pub colors_max: u32,
+    pub speed: u32,
+    pub brightness: u32,
+    pub direction: u32,
+    pub color_mode: u32,
+    pub colors: Vec<u32>,
+}
+
+impl Mode {
+    pub fn has_speed(&self) -> bool {
+        self.speed_max > self.speed_min
+    }
+    pub fn has_brightness(&self) -> bool {
+        self.brightness_max > self.brightness_min
+    }
+    pub fn takes_color(&self) -> bool {
+        self.colors_max > 0
+    }
+
+    /// Serialize this mode for UPDATE_MODE (no leading size/index — the caller
+    /// frames those). Mirrors OpenRGB's mode serialization order.
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut b = Vec::new();
+        write_string(&mut b, &self.name);
+        b.extend_from_slice(&self.value.to_le_bytes());
+        b.extend_from_slice(&self.flags.to_le_bytes());
+        for v in [
+            self.speed_min,
+            self.speed_max,
+            self.brightness_min,
+            self.brightness_max,
+            self.colors_min,
+            self.colors_max,
+            self.speed,
+            self.brightness,
+            self.direction,
+            self.color_mode,
+        ] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        b.extend_from_slice(&(self.colors.len() as u16).to_le_bytes());
+        for c in &self.colors {
+            b.extend_from_slice(&c.to_le_bytes());
+        }
+        b
+    }
+}
+
+fn write_string(buf: &mut Vec<u8>, s: &str) {
+    let bytes = s.as_bytes();
+    // length includes the trailing NUL.
+    buf.extend_from_slice(&((bytes.len() + 1) as u16).to_le_bytes());
+    buf.extend_from_slice(bytes);
+    buf.push(0);
+}
+
+/// OpenRGB packs a color as `R | G<<8 | B<<16` in a little-endian u32.
+fn color_u32(c: Rgb) -> u32 {
+    (c.0 as u32) | ((c.1 as u32) << 8) | ((c.2 as u32) << 16)
 }
 
 impl OpenRgb {
@@ -136,23 +223,93 @@ impl OpenRgb {
             .find(|c| c.name.to_lowercase().contains(&needle)))
     }
 
-    /// Set every LED of a controller to one color, via Direct/Custom mode so it
-    /// persists rather than being overridden by an active effect.
+    /// Set every LED of a controller to one color.
     pub fn set_all(&mut self, ctrl: &Controller, color: Rgb) -> io::Result<()> {
+        let frame = vec![color; ctrl.led_count as usize];
+        self.set_leds(ctrl, &frame)
+    }
+
+    /// Set each LED individually — for the keyboard this is per-zone color
+    /// (4 LEDs = 4 zones). Switches to Direct/Custom mode first so the colors
+    /// persist instead of being overridden by an active effect. If `colors` is
+    /// shorter than the LED count the last color is repeated; longer is
+    /// truncated.
+    pub fn set_leds(&mut self, ctrl: &Controller, colors: &[Rgb]) -> io::Result<()> {
         self.send(ctrl.index, SET_CUSTOM_MODE, &[])?;
 
-        let n = ctrl.led_count;
-        let mut inner = Vec::with_capacity(2 + n as usize * 4);
-        inner.extend_from_slice(&n.to_le_bytes());
-        for _ in 0..n {
-            // OpenRGB color is R,G,B,0 little-endian.
-            inner.extend_from_slice(&[color.0, color.1, color.2, 0]);
+        let n = ctrl.led_count as usize;
+        let fallback = colors.last().copied().unwrap_or(Rgb(0, 0, 0));
+
+        let mut inner = Vec::with_capacity(2 + n * 4);
+        inner.extend_from_slice(&(n as u16).to_le_bytes());
+        for i in 0..n {
+            let c = colors.get(i).copied().unwrap_or(fallback);
+            inner.extend_from_slice(&[c.0, c.1, c.2, 0]);
         }
 
         let mut payload = Vec::with_capacity(4 + inner.len());
         payload.extend_from_slice(&((inner.len() + 4) as u32).to_le_bytes());
         payload.extend_from_slice(&inner);
         self.send(ctrl.index, UPDATE_LEDS, &payload)
+    }
+
+    /// Set the LEDs of a single zone. `zone` indexes into `ctrl.zones`.
+    pub fn set_zone(&mut self, ctrl: &Controller, zone: usize, colors: &[Rgb]) -> io::Result<()> {
+        self.send(ctrl.index, SET_CUSTOM_MODE, &[])?;
+        let n = ctrl.zones.get(zone).map(|z| z.1 as usize).unwrap_or(0);
+        let fallback = colors.last().copied().unwrap_or(Rgb(0, 0, 0));
+
+        let mut inner = Vec::with_capacity(4 + 2 + n * 4);
+        inner.extend_from_slice(&(zone as u32).to_le_bytes());
+        inner.extend_from_slice(&(n as u16).to_le_bytes());
+        for i in 0..n {
+            let c = colors.get(i).copied().unwrap_or(fallback);
+            inner.extend_from_slice(&[c.0, c.1, c.2, 0]);
+        }
+        let mut payload = Vec::with_capacity(4 + inner.len());
+        payload.extend_from_slice(&((inner.len() + 4) as u32).to_le_bytes());
+        payload.extend_from_slice(&inner);
+        self.send(ctrl.index, UPDATE_ZONE_LEDS, &payload)
+    }
+
+    /// Invoke a firmware effect by name, with one color and (where supported)
+    /// speed and brightness. The controller then animates it host-free.
+    ///
+    /// `speed`/`brightness` are clamped to the mode's advertised range.
+    pub fn apply_effect(
+        &mut self,
+        ctrl: &Controller,
+        mode_name: &str,
+        color: Rgb,
+        speed: Option<u32>,
+        brightness: Option<u32>,
+    ) -> io::Result<()> {
+        let mut mode = ctrl
+            .mode(mode_name)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such mode"))?
+            .clone();
+
+        if let Some(s) = speed {
+            if mode.has_speed() {
+                mode.speed = s.clamp(mode.speed_min, mode.speed_max);
+            }
+        }
+        if let Some(b) = brightness {
+            if mode.has_brightness() {
+                mode.brightness = b.clamp(mode.brightness_min, mode.brightness_max);
+            }
+        }
+        if mode.takes_color() {
+            mode.colors = vec![color_u32(color)];
+        }
+
+        let mode_bytes = mode.to_bytes();
+        let mut payload = Vec::with_capacity(8 + mode_bytes.len());
+        let total = 8 + mode_bytes.len();
+        payload.extend_from_slice(&(total as u32).to_le_bytes());
+        payload.extend_from_slice(&mode.index.to_le_bytes());
+        payload.extend_from_slice(&mode_bytes);
+        self.send(ctrl.index, UPDATE_MODE, &payload)
     }
 }
 
@@ -216,23 +373,39 @@ fn parse_controller(index: u32, blob: &[u8]) -> io::Result<Controller> {
     let num_modes = c.u16();
     let _active_mode = c.i32();
     let mut modes = Vec::with_capacity(num_modes as usize);
-    for _ in 0..num_modes {
-        let mode_name = c.string();
-        let _value = c.i32();
-        let _flags = c.u32();
-        let _speed_min = c.u32();
-        let _speed_max = c.u32();
-        let _bright_min = c.u32();
-        let _bright_max = c.u32();
-        let _colors_min = c.u32();
-        let _colors_max = c.u32();
-        let _speed = c.u32();
-        let _brightness = c.u32();
-        let _direction = c.u32();
-        let _color_mode = c.u32();
+    for i in 0..num_modes {
+        let name = c.string();
+        let value = c.i32();
+        let flags = c.u32();
+        let speed_min = c.u32();
+        let speed_max = c.u32();
+        let brightness_min = c.u32();
+        let brightness_max = c.u32();
+        let colors_min = c.u32();
+        let colors_max = c.u32();
+        let speed = c.u32();
+        let brightness = c.u32();
+        let direction = c.u32();
+        let color_mode = c.u32();
         let num_colors = c.u16();
-        c.skip(num_colors as usize * 4);
-        modes.push(mode_name);
+        let colors = (0..num_colors).map(|_| c.u32()).collect();
+        modes.push(Mode {
+            index: i as u32,
+            name,
+            value,
+            flags,
+            speed_min,
+            speed_max,
+            brightness_min,
+            brightness_max,
+            colors_min,
+            colors_max,
+            speed,
+            brightness,
+            direction,
+            color_mode,
+            colors,
+        });
     }
 
     let num_zones = c.u16();
