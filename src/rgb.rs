@@ -395,4 +395,31 @@ mod tests {
         let path = fire_matrix_and_report(&shots);
         eprintln!("report written: {}", path.display());
     }
+
+    /// CONFIRM the effect write is *visible*, not just accepted.
+    ///
+    /// Walks the keyboard red → green → blue via the now-decoded effect packet
+    /// (breath, enable flag set), ~3s each. A coincidence can't follow a
+    /// commanded colour sequence, so if the keys track it, the write path is
+    /// confirmed end to end. All three should log `gmOutput=0x0`.
+    ///
+    /// `#[ignore]` by default. Run elevated:
+    ///
+    /// ```text
+    /// cargo test --bin colormemuch -- --ignored --exact \
+    ///     rgb::tests::hw_confirm_effect --nocapture
+    /// ```
+    #[test]
+    #[ignore = "writes real hardware; run explicitly and elevated"]
+    fn hw_confirm_effect() {
+        let m = "SetGamingKBBacklight".to_string();
+        let breath = |color| effect_payload(Effect::Breath, 4, 100, 1, color).to_vec();
+        let shots = vec![
+            ("confirm RED".to_string(), m.clone(), breath(Rgb(0xFF, 0x00, 0x00))),
+            ("confirm GREEN".to_string(), m.clone(), breath(Rgb(0x00, 0xFF, 0x00))),
+            ("confirm BLUE".to_string(), m.clone(), breath(Rgb(0x00, 0x00, 0xFF))),
+        ];
+        let path = fire_matrix_and_report(&shots);
+        eprintln!("report written: {}", path.display());
+    }
 }
