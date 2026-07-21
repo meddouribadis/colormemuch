@@ -4,6 +4,8 @@ mod app;
 mod config;
 mod git_update;
 #[cfg(windows)]
+mod openrgb;
+#[cfg(windows)]
 mod rgb;
 #[cfg(windows)]
 mod wmi;
