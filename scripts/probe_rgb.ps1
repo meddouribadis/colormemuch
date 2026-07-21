@@ -12,7 +12,7 @@
   firmware reports so the Rust payload builder can be written against real
   bytes instead of guesses.
 
-  MUST RUN ELEVATED. Instantiating root\WMI:AcerGamingFunction is admin-only —
+  MUST RUN ELEVATED. Instantiating root\WMI:AcerGamingFunction is admin-only --
   unelevated it fails with "Access denied" on every method.
 
 .EXAMPLE

@@ -27,7 +27,7 @@ $id = [Security.Principal.WindowsIdentity]::GetCurrent()
 $admin = (New-Object Security.Principal.WindowsPrincipal $id).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $admin) {
-    Write-Host "NOT ELEVATED — stopping services and WMI writes will fail. Re-launch via -Verb RunAs." -ForegroundColor Yellow
+    Write-Host "NOT ELEVATED -- stopping services and WMI writes will fail. Re-launch via -Verb RunAs." -ForegroundColor Yellow
     return
 }
 
@@ -53,7 +53,7 @@ cargo test -q --bin colormemuch -- --ignored --exact rgb::tests::hw_confirm_effe
 $report = Get-ChildItem -Path $repo -Filter 'kbmatrix-*.txt' |
           Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if ($report) { Write-Host "done. report: $($report.FullName)" -ForegroundColor Green }
-else         { Write-Host "no report — check $log" -ForegroundColor Red }
+else         { Write-Host "no report -- check $log" -ForegroundColor Red }
 
 Write-Host ""
 Write-Host "The keyboard is now showing whatever our LAST write set (breath BLUE), if the" -ForegroundColor Gray
