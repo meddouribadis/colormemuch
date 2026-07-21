@@ -211,7 +211,10 @@ pub fn fire_and_report(label: &str, method: &str, payload: &[u8]) -> std::path::
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let path = std::path::PathBuf::from(format!("kbwrite-{ts}.txt"));
+    // Absolute path anchored at the crate root, NOT the cwd: an elevated shell
+    // starts in System32, so a cwd-relative report lands somewhere invisible
+    // (or fails to write). This keeps it in the repo where it can be read.
+    let path = report_path(&format!("kbwrite-{ts}.txt"));
 
     let hex = payload
         .iter()
@@ -238,6 +241,64 @@ pub fn fire_and_report(label: &str, method: &str, payload: &[u8]) -> std::path::
 
     // Best-effort: if even the file write fails, the returned path lets the
     // caller report that rather than silently swallowing it.
+    let _ = std::fs::write(&path, &out);
+    path
+}
+
+/// Resolve a report filename to an absolute path under the crate root.
+///
+/// `CARGO_MANIFEST_DIR` is baked in at compile time, so this is stable
+/// regardless of the elevated process's working directory.
+fn report_path(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(name)
+}
+
+/// Fire a whole matrix of candidate payloads in ONE elevated session, logging
+/// every `gmOutput` to a single report.
+///
+/// This exists because the firmware answers a malformed packet with a status
+/// word (e.g. `gmOutput=0x1`) rather than a COM error — so the *accepted*
+/// packet is identifiable by its return code without a separate UAC prompt per
+/// guess. A delay between shots lets the eye catch which one visibly lands; the
+/// return-code column is the primary signal, the eye is the tiebreak.
+///
+/// Each shot is `(label, method, payload)`. Keyboard-only surfaces here; all
+/// are reversible via PredatorSense.
+pub fn fire_matrix_and_report(shots: &[(String, String, Vec<u8>)]) -> std::path::PathBuf {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = report_path(&format!("kbmatrix-{ts}.txt"));
+
+    let mut out = String::new();
+    out.push_str(&format!("colormemuch write matrix — epoch {ts}\n"));
+    out.push_str(&format!("{} shots, ~3s apart. gmOutput is the key column:\n", shots.len()));
+    out.push_str("a code that differs from the known-rejected 0x1 is the one to trust.\n\n");
+
+    match Wmi::connect() {
+        Ok(wmi) => {
+            for (i, (label, method, payload)) in shots.iter().enumerate() {
+                let hex = payload
+                    .iter()
+                    .map(|b| format!("{b:02X}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                out.push_str(&format!("[{i}] t+{}s  {label}\n", i * 3));
+                out.push_str(&format!("    {method} <- [{hex}] ({} bytes)\n", payload.len()));
+                match wmi.call_bytes(method, payload) {
+                    Ok(status) => out.push_str(&format!("    gmOutput = 0x{status:X}\n\n")),
+                    Err(e) => out.push_str(&format!("    ERROR: {e}\n\n")),
+                }
+                std::thread::sleep(Duration::from_secs(3));
+            }
+            out.push_str("done — note WHICH step (if any) turned the keyboard green and whether it stuck.\n");
+        }
+        Err(e) => out.push_str(&format!("CONNECT FAILED  {e}\n(elevated?)\n")),
+    }
+
     let _ = std::fs::write(&path, &out);
     path
 }
@@ -273,18 +334,48 @@ mod tests {
     ///     rgb::tests::hw_write_keyboard_breath_green --nocapture
     /// ```
     ///
-    /// Expected effect: the keyboard breathes GREEN (mode=Breath). It's
-    /// deliberately not red — the keyboard is red now, so green is an
-    /// unmistakable, obviously-intentional change. Restore anytime by
-    /// re-selecting a profile in PredatorSense.
+    /// FIRST-WRITE DECODE MATRIX — keyboard only, reversible.
     ///
-    /// Writes the outcome to `kbwrite-<epoch>.txt` in the package root and
-    /// prints only that path — no console noise to paste around.
+    /// The first attempt (bytes 8–9 zeroed) returned `gmOutput=0x1` and did
+    /// nothing visible. This fires four green candidates in one elevated
+    /// session to find which packet the firmware actually accepts. Green is
+    /// deliberate — the keyboard is red now, so any green is unmistakably ours.
+    ///
+    /// `#[ignore]` by default. Run explicitly and elevated:
+    ///
+    /// ```text
+    /// cargo test --bin colormemuch -- --ignored --exact \
+    ///     rgb::tests::hw_keyboard_matrix --nocapture
+    /// ```
+    ///
+    /// Reads `kbmatrix-<epoch>.txt` (absolute path, crate root) for the
+    /// gmOutput column; restore anytime via PredatorSense.
     #[test]
     #[ignore = "writes real hardware; run explicitly and elevated"]
-    fn hw_write_keyboard_breath_green() {
-        let payload = effect_payload(Effect::Breath, 5, 100, 1, Rgb(0x00, 0xFF, 0x00));
-        let path = fire_and_report("keyboard breath green", "SetGamingKBBacklight", &payload);
+    fn hw_keyboard_matrix() {
+        let green = Rgb(0x00, 0xFF, 0x00);
+
+        // Baseline: what returned 0x1 last time (8=0, 9=0).
+        let baseline = effect_payload(Effect::Breath, 5, 100, 1, green).to_vec();
+        // nekro-sense's exact effect buffer: [8]=3, [9]=1 (the enable flag).
+        let mut nekro = baseline.clone();
+        nekro[8] = 3;
+        nekro[9] = 1;
+        // Enable flag only, to isolate whether [9] alone flips it.
+        let mut enable_only = baseline.clone();
+        enable_only[9] = 1;
+        // The other documented shape entirely: 4-byte per-zone static, all zones.
+        let static4 = static_zone_payload(ALL_ZONES, green).to_vec();
+
+        let m = "SetGamingKBBacklight".to_string();
+        let shots = vec![
+            ("baseline breath (8=0,9=0) — expect 0x1".to_string(), m.clone(), baseline),
+            ("nekro-sense breath (8=3,9=1)".to_string(), m.clone(), nekro),
+            ("enable-only breath (9=1)".to_string(), m.clone(), enable_only),
+            ("static 4-byte all-zones green".to_string(), m.clone(), static4),
+        ];
+
+        let path = fire_matrix_and_report(&shots);
         eprintln!("report written: {}", path.display());
     }
 }
