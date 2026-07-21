@@ -1,0 +1,13 @@
+colormemuch WMI wide-net trace - 20260720-202451, 120s window
+PredatorSense PIDs at start: 22840,39080,43024,43408
+Total method-call events: 0
+
+=== DISTINCT class::method by caller ===
+
+=== LIGHTING-SUSPECT calls (method or class matches led/rgb/light/kb/backlight/color) ===
+  (none -- no lighting-named WMI method was called by anyone during the window)
+
+=== calls from a PredatorSense process ===
+  (none -- PredatorSense made NO WMI method calls in the window)
+
+=== full chronological method calls ===
