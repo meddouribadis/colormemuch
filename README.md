@@ -12,18 +12,32 @@
 
 ## Why
 
-PredatorSense is the sanctioned UI but it (a) can't be scripted, (b) fights other services for the sensor driver, and (c) hides the lid shield behind its own opinionated presets. `colormemuch` talks to the same **`AcerGamingFunction` WMI interface** PredatorSense uses (GUID `7A4DDFE7-5B5D-40B4-8595-4408E0CC7F56`) and exposes it as first-class knobs — for automation, WSL session hooks, focus modes, game launches, whatever.
+PredatorSense is the sanctioned UI but it (a) can't be scripted, (b) fights other services for the driver, and (c) hides the lid shield behind its own opinionated presets. `colormemuch` drives the same lighting hardware directly and exposes it as first-class knobs — for automation, WSL session hooks, focus modes, game launches, whatever.
 
-## Approach
+## Approach — how the lighting is actually driven
 
-The RGB protocol has already been reverse-engineered by the Linux community — this project ports that work to Windows and wraps it in a clean Rust binary + tray UI.
+The original plan was the `AcerGamingFunction` WMI interface (GUID
+`7A4DDFE7-5B5D-40B4-8595-4408E0CC7F56`). **That turned out to be a dead end for
+lighting** — every WMI colour write is *accepted* but never reaches the LEDs;
+that class governs fans/thermals/profiles, not the backlight. Reverse
+engineering (see `scripts/*.ps1` and the session memory) established the real
+path:
 
-**Prior art / references:**
+**Acer bundles OpenRGB.** The PredatorSense package ships `OpenRGB.exe` and runs
+it as a local SDK server on `127.0.0.1:6742`; `AcerLightingService` is itself an
+OpenRGB *client*. The LEDs are three OpenRGB controllers — `AcerHIDKeyboard`
+(4 zones), `AcerHIDCoverLogoLED` (the lid "shield"), and `AcerHIDModeKeyLED`.
 
-- [JafarAkhondali/acer-predator-turbo-and-rgb-keyboard-linux-module](https://github.com/JafarAkhondali/acer-predator-turbo-and-rgb-keyboard-linux-module) — canonical Linux kernel module + `facer_rgb.py` CLI; decoded 4-zone keyboard protocol
-- [FelipeFMA/nekro-sense](https://github.com/FelipeFMA/nekro-sense) — closest sibling (PHN16-72), most likely byte-for-byte compatible
-- [cleyton1986/predator-sense](https://github.com/cleyton1986/predator-sense) — Rust + GTK4 reimplementation (Linux), transferable design patterns
-- [InvertedOwl/Acer-SenSe](https://github.com/InvertedOwl/Acer-SenSe) — Predator + Nitro coverage
+So colormemuch speaks the **OpenRGB SDK** directly (`src/openrgb.rs`, a small
+blocking `std::net` client — no elevation needed). This is *more* capable than
+the WMI route: the lid shield the Linux drivers never mapped is a first-class
+controller here.
+
+**Prior art that got us there:**
+
+- [JafarAkhondali/acer-predator-turbo-and-rgb-keyboard-linux-module](https://github.com/JafarAkhondali/acer-predator-turbo-and-rgb-keyboard-linux-module) — decoded the 4-zone keyboard payload
+- [FelipeFMA/nekro-sense](https://github.com/FelipeFMA/nekro-sense) — the PHN16-72 sibling; confirmed the enable-flag byte
+- [OpenRGB](https://openrgb.org) — the actual mechanism Acer ships and colormemuch talks to
 
 ## Upstream
 
@@ -38,12 +52,39 @@ Distilled learnings from this project — packaging, WMI-call patterns, tray-app
 
 ## Status
 
-🚧 Scaffolded. Next steps:
+✅ **Working desktop app.** Keyboard (4 zones) and the lid shield are both under
+full control via a native egui screen. Feature set:
 
-1. Bind `AcerGamingFunction` WMI methods (`SetGamingRgbKb`, `SetGamingLED`, `SetGamingLEDColor`, `SetGamingLEDBehavior`, `SetGamingKBBacklight`) via `windows` / `wmi` crates.
-2. Port `facer_rgb.py`'s payload builder to Rust (4-byte-per-zone static + 16-byte effect packet).
-3. Observe-then-replay the **lid shield** byte (SetGamingLED family — the piece the Linux drivers didn't map).
-4. CLI first (`colormemuch set --keyboard breath --color #ff00aa --speed 5`), then a minimal egui tray.
+- **Three effect types.** *Core* — firmware effects (Neon/Wave/Meteor/…),
+  whole-device, **zero host CPU**. *Program* — built-in `fn(t,n)` effects
+  (Rainbow, Comet, Fire, …), per zone. *Custom* — user-built palette + motion
+  effects, per zone, **fully editable in-app** and saved to
+  `%APPDATA%/ColorMeMuch/effects.json`.
+- **Per-zone independent control** on one **shared clock**: two zones running
+  the same function are phase-locked with no drift; **Link** (identical) or
+  **Spread** (the effect travels across the zones) per group.
+- **Persistence** — your whole setup (per-device mode, per-zone assignments,
+  master brightness, Link/Spread) is restored on launch.
+- **Efficient** — adaptive frame rate per effect; static zones and idle devices
+  send nothing. Full animation costs ≈0.5% CPU.
+
+### Source map
+
+| File | Role |
+|---|---|
+| `src/openrgb.rs` | OpenRGB SDK client — enumerate controllers, set LEDs, invoke firmware effects |
+| `src/effects.rs` | `Fx` (Program/Custom), pure `fn(t,n)` effects, shared-clock render pipeline |
+| `src/library.rs` | Custom effect schema (palette + motion) + on-disk library |
+| `src/ui.rs` | The egui control screen: device panel, per-zone cards, effect editor |
+| `src/rgb.rs`, `src/wmi.rs` | The WMI layer — retained for fan/thermal/profile reads (not lighting) |
+| `scripts/*.ps1` | The reverse-engineering toolkit that found the OpenRGB path |
+
+### Not yet built
+
+- CLI (`colormemuch set --keyboard rainbow …`) for scripting.
+- System-tray + global hotkeys / automation triggers.
+- Optional: move animation to a worker thread so the keyboard keeps animating
+  while the window is minimized.
 
 ## Build
 

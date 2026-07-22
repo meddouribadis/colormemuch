@@ -46,6 +46,13 @@ impl ColormemuchApp {
 }
 
 impl eframe::App for ColormemuchApp {
+    /// Called by eframe periodically and on exit — persist the lighting setup
+    /// here so there's no per-frame disk IO.
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        #[cfg(windows)]
+        self.rgb.save_setup();
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {

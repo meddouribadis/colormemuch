@@ -17,10 +17,12 @@
 
 use std::f32::consts::PI;
 
+use serde::{Deserialize, Serialize};
+
 use crate::rgb::Rgb;
 
 /// The catalogue of built-in software effects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Effect {
     /// A hue that rotates over time, spread across the strip.
     Rainbow,

@@ -9,18 +9,23 @@
 
 #![cfg(windows)]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, RichText};
+use serde::{Deserialize, Serialize};
 
 use crate::effects::{render_plan, scale, shared_clock_groups, Effect, Fx, Group, Params, ZoneSource};
 use crate::library::{ColorStop, CustomEffect, EffectLibrary, Motion};
 use crate::openrgb::{Controller, OpenRgb};
 use crate::rgb::Rgb;
 
-const PUSH_HZ: f32 = 20.0;
+/// Animation/repaint rate is chosen per active effect between these bounds — a
+/// breathing effect needs far fewer frames than a comet.
+const MIN_HZ: f32 = 8.0;
+const MAX_HZ: f32 = 30.0;
 
 // Type accents (match the mockup tokens).
 const CORE_HUE: Color32 = Color32::from_rgb(0x4b, 0xbf, 0x73); // green: 0 CPU
@@ -28,14 +33,14 @@ const PROG_HUE: Color32 = Color32::from_rgb(0x1f, 0xb7, 0xa6); // teal
 const CUST_HUE: Color32 = Color32::from_rgb(0xb0, 0x7c, 0xff); // purple
 
 /// A zone's animated/static source choice.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 enum Kind {
     Solid,
     Program(Effect),
     Custom(String),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct ZoneUi {
     kind: Kind,
     color: [u8; 3],
@@ -75,7 +80,7 @@ impl ZoneUi {
 }
 
 /// A whole-device firmware (Core) effect — the zero-CPU path.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct HwEffect {
     mode: String,
     color: [u8; 3],
@@ -92,10 +97,46 @@ impl HwEffect {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 enum DeviceMode {
     PerZone,
     Hardware(HwEffect),
+}
+
+/// The persisted lighting setup — per-device mode + zones, keyed by controller
+/// name (stable across restarts), plus master brightness and the Spread set.
+#[derive(Default, Serialize, Deserialize)]
+struct LightingSetup {
+    master: u32,
+    spread: Vec<String>,
+    devices: HashMap<String, DeviceSetup>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DeviceSetup {
+    mode: DeviceMode,
+    zones: Vec<ZoneUi>,
+}
+
+impl LightingSetup {
+    fn path() -> Option<PathBuf> {
+        dirs::config_dir().map(|p| p.join(crate::APP_NAME).join("setup.json"))
+    }
+    fn load() -> Self {
+        Self::path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+    fn save(&self) {
+        let Some(p) = Self::path() else { return };
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(s) = serde_json::to_string_pretty(self) {
+            let _ = std::fs::write(p, s);
+        }
+    }
 }
 
 /// State of the custom-effect editor window.
@@ -162,10 +203,77 @@ impl RgbControl {
 
         self.effect_editor_window(ctx, t);
 
-        let animating = self.push_if_due(t);
+        let hz = self.active_hz();
+        let animating = self.push_if_due(t, hz);
         if animating || self.editor.is_some() {
-            ctx.request_repaint_after(Duration::from_secs_f32(1.0 / PUSH_HZ));
+            ctx.request_repaint_after(Duration::from_secs_f32(1.0 / hz));
         }
+    }
+
+    /// Pick a frame rate from the busiest active effect — a breathing pulse
+    /// wants ~10 Hz, a comet ~24. Idle → the floor. Keeps CPU proportional to
+    /// what's actually moving.
+    fn active_hz(&self) -> f32 {
+        let Conn::Ready { zones, dev_mode, .. } = &self.conn else {
+            return MIN_HZ;
+        };
+        let mut hz = MIN_HZ;
+        for (i, m) in dev_mode.iter().enumerate() {
+            if !matches!(m, DeviceMode::PerZone) {
+                continue;
+            }
+            for z in &zones[i] {
+                let want = match &z.kind {
+                    Kind::Solid => 0.0,
+                    Kind::Program(e) => match e {
+                        Effect::Comet | Effect::Fire | Effect::Police | Effect::Wave => 24.0,
+                        Effect::Rainbow | Effect::Gradient => 16.0,
+                        Effect::Breathe => 10.0,
+                    },
+                    Kind::Custom(name) => match self.library.get(name).map(|c| c.motion) {
+                        Some(Motion::Twinkle) => 22.0,
+                        Some(Motion::Scroll) | Some(Motion::Bounce) => 18.0,
+                        Some(Motion::Pulse) => 10.0,
+                        _ => 0.0,
+                    },
+                };
+                hz = hz.max(want);
+            }
+        }
+        hz.clamp(MIN_HZ, MAX_HZ)
+    }
+
+    /// Capture and persist the current setup. Called by eframe's periodic /
+    /// on-exit save hook, so there's no per-frame disk IO.
+    pub fn save_setup(&self) {
+        let Conn::Ready {
+            controllers,
+            zones,
+            dev_mode,
+            ..
+        } = &self.conn
+        else {
+            return;
+        };
+        let devices = controllers
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                (
+                    c.name.clone(),
+                    DeviceSetup {
+                        mode: dev_mode[i].clone(),
+                        zones: zones[i].clone(),
+                    },
+                )
+            })
+            .collect();
+        LightingSetup {
+            master: self.master,
+            spread: self.spread.iter().cloned().collect(),
+            devices,
+        }
+        .save();
     }
 
     fn poll_connection(&mut self) {
@@ -175,15 +283,32 @@ impl RgbControl {
                 self.conn = match res {
                     Ok((client, controllers)) => {
                         let n = controllers.len();
-                        let zones = controllers
+                        let mut zones: Vec<Vec<ZoneUi>> = controllers
                             .iter()
                             .map(|c| vec![ZoneUi::default(); c.led_count as usize])
                             .collect();
+                        let mut dev_mode = vec![DeviceMode::PerZone; n];
+
+                        // Restore the saved setup where the device still matches.
+                        let setup = LightingSetup::load();
+                        for (i, c) in controllers.iter().enumerate() {
+                            if let Some(ds) = setup.devices.get(&c.name) {
+                                if ds.zones.len() == zones[i].len() {
+                                    zones[i] = ds.zones.clone();
+                                    dev_mode[i] = ds.mode.clone();
+                                }
+                            }
+                        }
+                        if setup.master > 0 || !setup.devices.is_empty() {
+                            self.master = setup.master.clamp(0, 100).max(1);
+                        }
+                        self.spread = setup.spread.into_iter().collect();
+
                         Conn::Ready {
                             client,
                             controllers,
                             zones,
-                            dev_mode: vec![DeviceMode::PerZone; n],
+                            dev_mode,
                             direct_set: vec![false; n],
                             applied_hw: vec![None; n],
                             last_frame: vec![Vec::new(); n],
@@ -623,7 +748,7 @@ impl RgbControl {
 
     // ---- hardware push -----------------------------------------------------
 
-    fn push_if_due(&mut self, t: f32) -> bool {
+    fn push_if_due(&mut self, t: f32, hz: f32) -> bool {
         let lib = &self.library;
         let spread = &self.spread;
         let master = self.master as f32 / 100.0;
@@ -646,7 +771,7 @@ impl RgbControl {
                 && zones[i].iter().any(|z| !matches!(z.kind, Kind::Solid))
         });
 
-        let due = self.last_push.elapsed().as_secs_f32() >= 1.0 / PUSH_HZ;
+        let due = self.last_push.elapsed().as_secs_f32() >= 1.0 / hz;
         if !due && !self.dirty {
             return animating;
         }
