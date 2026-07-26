@@ -13,6 +13,8 @@ fn main() {
     println!("cargo:rustc-env=APP_VERSION={full_version}");
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs/tags");
+    println!("cargo:rerun-if-changed=assets/colormemuch.manifest");
+    println!("cargo:rerun-if-changed=assets/icon.ico");
 
     #[cfg(target_os = "windows")]
     {

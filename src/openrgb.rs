@@ -38,6 +38,17 @@ const UPDATE_LEDS: u32 = 1050;
 const UPDATE_ZONE_LEDS: u32 = 1051;
 const SET_CUSTOM_MODE: u32 = 1053;
 const UPDATE_MODE: u32 = 1100;
+const SAVE_MODE: u32 = 1101;
+
+// Mode flag bits (OpenRGB `RGBController.h`). We only name the ones we act on.
+pub const MODE_FLAG_HAS_SPEED: u32 = 1 << 0;
+pub const MODE_FLAG_HAS_BRIGHTNESS: u32 = 1 << 4;
+pub const MODE_FLAG_HAS_PER_LED_COLOR: u32 = 1 << 5;
+pub const MODE_FLAG_HAS_MODE_SPECIFIC_COLOR: u32 = 1 << 6;
+/// The controller can persist this mode to onboard flash via `SAVE_MODE`.
+pub const MODE_FLAG_MANUAL_SAVE: u32 = 1 << 8;
+/// The controller persists automatically on `UPDATE_MODE` — no save needed.
+pub const MODE_FLAG_AUTOMATIC_SAVE: u32 = 1 << 9;
 
 /// Protocol version we advertise when requesting controller data. v4 matches the
 /// blob layout parsed below.
@@ -101,6 +112,15 @@ impl Mode {
     }
     pub fn takes_color(&self) -> bool {
         self.colors_max > 0
+    }
+    /// Whether this mode can be written to the device's onboard flash so it
+    /// survives a power cycle. Manual-save needs an explicit [`OpenRgb::
+    /// save_mode`]; automatic-save persists on `apply_effect` alone.
+    pub fn can_save(&self) -> bool {
+        self.flags & (MODE_FLAG_MANUAL_SAVE | MODE_FLAG_AUTOMATIC_SAVE) != 0
+    }
+    pub fn needs_manual_save(&self) -> bool {
+        self.flags & MODE_FLAG_MANUAL_SAVE != 0
     }
 
     /// Serialize this mode for UPDATE_MODE (no leading size/index — the caller
@@ -296,6 +316,48 @@ impl OpenRgb {
         speed: Option<u32>,
         brightness: Option<u32>,
     ) -> io::Result<()> {
+        let mode = self.resolve_mode(ctrl, mode_name, color, speed, brightness)?;
+        self.send_mode(ctrl.index, UPDATE_MODE, &mode)
+    }
+
+    /// Like [`apply_effect`](Self::apply_effect) but ALSO writes the mode to the
+    /// controller's onboard flash (`SAVE_MODE`) so it survives a power cycle
+    /// with no host process running — the zero-CPU "Base identity" tier.
+    ///
+    /// Returns `Ok(false)` (without touching the device) if the mode can't be
+    /// saved, so the caller can surface an honest "not supported" instead of
+    /// pretending it stuck. On a savable mode it applies then saves, returning
+    /// `Ok(true)`.
+    pub fn save_mode(
+        &mut self,
+        ctrl: &Controller,
+        mode_name: &str,
+        color: Rgb,
+        speed: Option<u32>,
+        brightness: Option<u32>,
+    ) -> io::Result<bool> {
+        let mode = self.resolve_mode(ctrl, mode_name, color, speed, brightness)?;
+        if !mode.can_save() {
+            return Ok(false);
+        }
+        // Set it active first so the saved parameters match what's showing.
+        self.send_mode(ctrl.index, UPDATE_MODE, &mode)?;
+        if mode.needs_manual_save() {
+            self.send_mode(ctrl.index, SAVE_MODE, &mode)?;
+        }
+        Ok(true)
+    }
+
+    /// Build a concrete [`Mode`] for `mode_name` with the given colour and
+    /// clamped speed/brightness — shared by apply and save.
+    fn resolve_mode(
+        &self,
+        ctrl: &Controller,
+        mode_name: &str,
+        color: Rgb,
+        speed: Option<u32>,
+        brightness: Option<u32>,
+    ) -> io::Result<Mode> {
         let mut mode = ctrl
             .mode(mode_name)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such mode"))?
@@ -314,14 +376,19 @@ impl OpenRgb {
         if mode.takes_color() {
             mode.colors = vec![color_u32(color)];
         }
+        Ok(mode)
+    }
 
+    /// Frame a mode blob (size + index + serialized mode) and send it under
+    /// `command` (`UPDATE_MODE` or `SAVE_MODE` — identical wire format).
+    fn send_mode(&mut self, device: u32, command: u32, mode: &Mode) -> io::Result<()> {
         let mode_bytes = mode.to_bytes();
-        let mut payload = Vec::with_capacity(8 + mode_bytes.len());
         let total = 8 + mode_bytes.len();
+        let mut payload = Vec::with_capacity(total);
         payload.extend_from_slice(&(total as u32).to_le_bytes());
         payload.extend_from_slice(&mode.index.to_le_bytes());
         payload.extend_from_slice(&mode_bytes);
-        self.send(ctrl.index, UPDATE_MODE, &payload)
+        self.send(device, command, &payload)
     }
 }
 

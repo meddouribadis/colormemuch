@@ -1,10 +1,24 @@
 [package]
 name = "colormemuch"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["ophiocus <csantanad@gmail.com>"]
 description = "Full control of all RGB features on the Acer Predator Helios Neo 16S AI"
 license = "MIT"
+
+[lib]
+name = "colormemuch"
+path = "src/lib.rs"
+
+# The GUI (default bin) and the daemon (Windows service). Both are thin hosts
+# over the `colormemuch` core lib — see docs/COMPOSITOR.md.
+[[bin]]
+name = "colormemuch"
+path = "src/main.rs"
+
+[[bin]]
+name = "colormemuch-svc"
+path = "src/bin/colormemuch-svc.rs"
 
 [dependencies]
 eframe = { version = "0.28", default-features = false, features = ["default_fonts", "glow", "persistence"] }
@@ -16,6 +30,9 @@ rfd = "0.14"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
 [target.'cfg(windows)'.dependencies]
+tray-icon = "0.19"
+interprocess = "1.2"
+windows-service = "0.7"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_Com",
@@ -23,7 +40,13 @@ windows = { version = "0.58", features = [
     "Win32_System_Rpc",
     "Win32_System_Variant",
     "Win32_System_Wmi",
+    "Win32_System_Power",
+    "Win32_System_Console",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
     "Win32_Security",
+    "Win32_Security_Authorization",
 ] }
 windows-core = "0.58"
 

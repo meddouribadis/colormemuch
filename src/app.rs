@@ -11,6 +11,10 @@ pub struct ColormemuchApp {
     #[cfg(windows)]
     rgb: crate::ui::RgbControl,
 
+    // Tray presence so closing the window keeps the engine holding colors.
+    #[cfg(windows)]
+    tray: Option<crate::tray::Tray>,
+
     // Self-update plumbing.
     pub update_state: UpdateState,
     pub update_error: Option<String>,
@@ -37,7 +41,9 @@ impl ColormemuchApp {
             config,
             status: None,
             #[cfg(windows)]
-            rgb: crate::ui::RgbControl::new(),
+            rgb: crate::ui::RgbControl::new(&cc.egui_ctx),
+            #[cfg(windows)]
+            tray: crate::tray::Tray::new(),
             update_state: UpdateState::Checking,
             update_error: None,
             update_rx: Some(rx),
@@ -54,6 +60,28 @@ impl eframe::App for ColormemuchApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Tray + close-to-tray: keep the engine holding colors after the window
+        // is dismissed. Only the tray's Quit actually exits.
+        #[cfg(windows)]
+        if let Some(tray) = &self.tray {
+            match tray.poll() {
+                Some(crate::tray::TrayAction::Show) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                Some(crate::tray::TrayAction::Quit) => std::process::exit(0),
+                None => {}
+            }
+
+            if ctx.input(|i| i.viewport().close_requested()) {
+                // Cancel the close and hide to the tray instead of exiting.
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+            // Keep ticking while hidden so tray events are still polled.
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        }
+
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {

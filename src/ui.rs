@@ -1,36 +1,43 @@
-//! The egui RGB control screen.
+//! The egui compositor screen.
 //!
-//! Three effect types, wired to their nature:
-//! * **Core** — firmware effects; whole-device, zero host CPU. A device-level
-//!   mode ([`DeviceMode::Hardware`]) set once via `apply_effect`.
-//! * **Program** — our built-in `fn(t,n)` effects; per-zone, animated.
-//! * **Custom** — user-built palette+motion effects from the [`EffectLibrary`];
-//!   per-zone, animated, and fully editable in the in-app editor.
+//! The UI never touches the socket — it owns *state* and hands a resolved
+//! [`EngineState`] to the [`crate::engine`] thread, which renders and holds it.
+//! That split is what lets a hidden window keep its colors alive.
+//!
+//! Three effect types, wired to their persistence tier:
+//! * **Core / Hardware** — a firmware mode; whole-device, zero host CPU. Can be
+//!   written to the keyboard's flash (**Firmware** tier) so it survives a reboot
+//!   with no process running.
+//! * **Program** — built-in `fn(t,n)` effects; per-zone, animated (**Daemon**
+//!   tier — the engine holds them while colormemuch runs, incl. in the tray).
+//! * **Custom** — user-built palette+motion effects, editable and persisted.
 
 #![cfg(windows)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Instant;
 
 use eframe::egui::{self, Color32, RichText};
 use serde::{Deserialize, Serialize};
 
-use crate::effects::{render_plan, scale, shared_clock_groups, Effect, Fx, Group, Params, ZoneSource};
-use crate::library::{ColorStop, CustomEffect, EffectLibrary, Motion};
-use crate::openrgb::{Controller, OpenRgb};
-use crate::rgb::Rgb;
+use colormemuch::effects::{
+    render_plan, scale, shared_clock_groups, Effect, Fx, Group, Params, ZoneSource,
+};
+use colormemuch::engine::{ControllerInfo, DeviceMode as EngDeviceMode, EngineState, HwSpec};
+use colormemuch::host::{self, Host, HostEvent};
+use colormemuch::library::{ColorStop, CustomEffect, EffectLibrary, Motion};
+use colormemuch::rgb::Rgb;
 
-/// Animation/repaint rate is chosen per active effect between these bounds — a
-/// breathing effect needs far fewer frames than a comet.
-const MIN_HZ: f32 = 8.0;
-const MAX_HZ: f32 = 30.0;
-
-// Type accents (match the mockup tokens).
-const CORE_HUE: Color32 = Color32::from_rgb(0x4b, 0xbf, 0x73); // green: 0 CPU
+// Type accents (match the compositor mockup tokens).
+const CORE_HUE: Color32 = Color32::from_rgb(0x4b, 0xbf, 0x73); // green: firmware, 0 CPU
 const PROG_HUE: Color32 = Color32::from_rgb(0x1f, 0xb7, 0xa6); // teal
 const CUST_HUE: Color32 = Color32::from_rgb(0xb0, 0x7c, 0xff); // purple
+// Persistence-tier accents.
+const TIER_DAEMON: Color32 = Color32::from_rgb(0x5d, 0xca, 0xa5);
+const TIER_FIRMWARE: Color32 = Color32::from_rgb(0x0f, 0x9e, 0x6f);
+const DANGER_HUE: Color32 = Color32::from_rgb(0xf0, 0x99, 0x7b);
 
 /// A zone's animated/static source choice.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -89,11 +96,13 @@ struct HwEffect {
 }
 
 impl HwEffect {
-    fn signature(&self) -> String {
-        format!(
-            "{}|{:?}|{}|{}",
-            self.mode, self.color, self.speed, self.brightness
-        )
+    fn to_spec(&self) -> HwSpec {
+        HwSpec {
+            mode: self.mode.clone(),
+            color: Rgb(self.color[0], self.color[1], self.color[2]),
+            speed: self.speed,
+            brightness: self.brightness,
+        }
     }
 }
 
@@ -104,12 +113,17 @@ enum DeviceMode {
 }
 
 /// The persisted lighting setup — per-device mode + zones, keyed by controller
-/// name (stable across restarts), plus master brightness and the Spread set.
+/// name (stable across restarts), plus master brightness, the Spread set, and
+/// the two persistence-spine toggles.
 #[derive(Default, Serialize, Deserialize)]
 struct LightingSetup {
     master: u32,
     spread: Vec<String>,
-    devices: HashMap<String, DeviceSetup>,
+    #[serde(default)]
+    hold: bool,
+    #[serde(default)]
+    battery_saver: bool,
+    devices: std::collections::HashMap<String, DeviceSetup>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -141,118 +155,185 @@ impl LightingSetup {
 
 /// State of the custom-effect editor window.
 struct EditorState {
-    /// Name being replaced (rename support); None for a brand-new effect.
     replacing: Option<String>,
     draft: CustomEffect,
 }
 
 enum Conn {
     Connecting,
-    Ready {
-        client: OpenRgb,
-        controllers: Vec<Controller>,
-        zones: Vec<Vec<ZoneUi>>,
-        dev_mode: Vec<DeviceMode>,
-        direct_set: Vec<bool>,
-        applied_hw: Vec<Option<String>>,
-        last_frame: Vec<Vec<Rgb>>,
-    },
+    Ready(Vec<ControllerInfo>),
     Failed(String),
 }
 
-type ConnResult = Result<(OpenRgb, Vec<Controller>), String>;
-
 pub struct RgbControl {
-    rx: Option<mpsc::Receiver<ConnResult>>,
+    host: Box<dyn Host>,
+    /// Kept so the host can be re-created on a dropped service connection.
+    waker: colormemuch::engine::Waker,
     conn: Conn,
     selected: usize,
+
+    // Per-device UI state, parallel to the controller list when Ready.
+    zones: Vec<Vec<ZoneUi>>,
+    dev_mode: Vec<DeviceMode>,
+
     spread: HashSet<String>,
     master: u32,
+    hold: bool,
+    battery_saver: bool,
+    on_battery: bool,
+
     clock: Instant,
-    last_push: Instant,
     dirty: bool,
     library: EffectLibrary,
     editor: Option<EditorState>,
+
+    save_status: Option<(Instant, String)>,
 }
 
 impl RgbControl {
-    pub fn new() -> Self {
+    pub fn new(ctx: &egui::Context) -> Self {
+        let setup = LightingSetup::load();
+        let ctx2 = ctx.clone();
+        let wake: colormemuch::engine::Waker = Arc::new(move || ctx2.request_repaint());
         Self {
-            rx: Some(spawn_connect()),
+            host: host::create(wake.clone()),
+            waker: wake,
             conn: Conn::Connecting,
             selected: 0,
-            spread: HashSet::new(),
-            master: 100,
+            zones: Vec::new(),
+            dev_mode: Vec::new(),
+            spread: setup.spread.iter().cloned().collect(),
+            master: if setup.master == 0 { 100 } else { setup.master.clamp(1, 100) },
+            hold: setup.hold,
+            battery_saver: setup.battery_saver,
+            on_battery: false,
             clock: Instant::now(),
-            last_push: Instant::now(),
-            dirty: true,
+            dirty: false,
             library: EffectLibrary::load(),
             editor: None,
+            save_status: None,
         }
     }
 
     pub fn show(&mut self, ctx: &egui::Context) {
-        self.poll_connection();
+        self.poll_host();
         let t = self.clock.elapsed().as_secs_f32();
 
         egui::SidePanel::left("devices")
             .exact_width(210.0)
             .show(ctx, |ui| self.side_panel(ui));
 
+        egui::SidePanel::right("spine")
+            .exact_width(226.0)
+            .show(ctx, |ui| self.spine_panel(ui));
+
         egui::CentralPanel::default().show(ctx, |ui| self.editor_view(ui, t));
 
         self.effect_editor_window(ctx, t);
 
-        let hz = self.active_hz();
-        let animating = self.push_if_due(t, hz);
-        if animating || self.editor.is_some() {
-            ctx.request_repaint_after(Duration::from_secs_f32(1.0 / hz));
+        // Ship a fresh snapshot to the engine only when something changed — the
+        // engine's own hold timer handles re-asserting against Acer, so an idle
+        // (or hidden) UI never needs to tick for lighting.
+        if self.dirty {
+            if let Conn::Ready(_) = &self.conn {
+                let state = self.engine_state();
+                self.host.set_state(&state);
+            }
+            self.dirty = false;
+        }
+
+        // Repaint only for the UI's own live previews / editor animation.
+        if self.selected_animating() || self.editor.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(42));
+        } else if matches!(self.conn, Conn::Connecting) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
     }
 
-    /// Pick a frame rate from the busiest active effect — a breathing pulse
-    /// wants ~10 Hz, a comet ~24. Idle → the floor. Keeps CPU proportional to
-    /// what's actually moving.
-    fn active_hz(&self) -> f32 {
-        let Conn::Ready { zones, dev_mode, .. } = &self.conn else {
-            return MIN_HZ;
-        };
-        let mut hz = MIN_HZ;
-        for (i, m) in dev_mode.iter().enumerate() {
-            if !matches!(m, DeviceMode::PerZone) {
-                continue;
-            }
-            for z in &zones[i] {
-                let want = match &z.kind {
-                    Kind::Solid => 0.0,
-                    Kind::Program(e) => match e {
-                        Effect::Comet | Effect::Fire | Effect::Police | Effect::Wave => 24.0,
-                        Effect::Rainbow | Effect::Gradient => 16.0,
-                        Effect::Breathe => 10.0,
-                    },
-                    Kind::Custom(name) => match self.library.get(name).map(|c| c.motion) {
-                        Some(Motion::Twinkle) => 22.0,
-                        Some(Motion::Scroll) | Some(Motion::Bounce) => 18.0,
-                        Some(Motion::Pulse) => 10.0,
-                        _ => 0.0,
-                    },
-                };
-                hz = hz.max(want);
-            }
+    /// Build the resolved compositor snapshot for the engine.
+    fn engine_state(&self) -> EngineState {
+        let devices = (0..self.dev_mode.len())
+            .map(|i| match &self.dev_mode[i] {
+                DeviceMode::Hardware(hw) => EngDeviceMode::Hardware(hw.to_spec()),
+                DeviceMode::PerZone => EngDeviceMode::PerZone(
+                    self.zones[i].iter().map(|z| z.to_source(&self.library)).collect(),
+                ),
+            })
+            .collect();
+        EngineState {
+            devices,
+            master: self.master as f32 / 100.0,
+            spread: self.spread.clone(),
+            hold: self.hold,
+            battery_saver: self.battery_saver,
         }
-        hz.clamp(MIN_HZ, MAX_HZ)
     }
 
-    /// Capture and persist the current setup. Called by eframe's periodic /
-    /// on-exit save hook, so there's no per-frame disk IO.
+    fn poll_host(&mut self) {
+        for ev in self.host.poll() {
+            match ev {
+                HostEvent::Connected(controllers) => {
+                    self.rebuild_devices(&controllers);
+                    self.conn = Conn::Ready(controllers);
+                    self.selected = self.selected.min(self.dev_mode.len().saturating_sub(1));
+                    self.dirty = true;
+                }
+                HostEvent::Disconnected(e) => {
+                    if self.host.via_service() {
+                        // The service dropped — fail over seamlessly: re-create
+                        // the host, which reconnects if the service came back,
+                        // or embeds and takes the hardware directly. (An
+                        // embedded host's own engine self-heals, so we only
+                        // re-create for a service-backed one.)
+                        self.host = host::create(self.waker.clone());
+                        self.conn = Conn::Connecting;
+                        self.dirty = true;
+                    } else {
+                        self.conn = Conn::Failed(e);
+                    }
+                }
+                HostEvent::OnBattery(b) => self.on_battery = b,
+                HostEvent::SaveResult(res) => {
+                    let msg = match res {
+                        Ok(true) => "Saved to keyboard flash — survives reboot.".to_string(),
+                        Ok(false) => "This effect can't be saved to firmware.".to_string(),
+                        Err(e) => format!("Save failed: {e}"),
+                    };
+                    self.save_status = Some((Instant::now(), msg));
+                }
+            }
+        }
+        if let Some((when, _)) = &self.save_status {
+            if when.elapsed().as_secs() > 8 {
+                self.save_status = None;
+            }
+        }
+    }
+
+    /// Size the per-device UI state to the controllers, restoring the saved
+    /// setup wherever a device still matches.
+    fn rebuild_devices(&mut self, controllers: &[ControllerInfo]) {
+        let setup = LightingSetup::load();
+        let mut zones: Vec<Vec<ZoneUi>> = controllers
+            .iter()
+            .map(|c| vec![ZoneUi::default(); c.led_count as usize])
+            .collect();
+        let mut dev_mode = vec![DeviceMode::PerZone; controllers.len()];
+        for (i, c) in controllers.iter().enumerate() {
+            if let Some(ds) = setup.devices.get(&c.name) {
+                if ds.zones.len() == zones[i].len() {
+                    zones[i] = ds.zones.clone();
+                    dev_mode[i] = ds.mode.clone();
+                }
+            }
+        }
+        self.zones = zones;
+        self.dev_mode = dev_mode;
+    }
+
+    /// Capture and persist the setup (eframe's periodic / on-exit save hook).
     pub fn save_setup(&self) {
-        let Conn::Ready {
-            controllers,
-            zones,
-            dev_mode,
-            ..
-        } = &self.conn
-        else {
+        let Conn::Ready(controllers) = &self.conn else {
             return;
         };
         let devices = controllers
@@ -262,8 +343,8 @@ impl RgbControl {
                 (
                     c.name.clone(),
                     DeviceSetup {
-                        mode: dev_mode[i].clone(),
-                        zones: zones[i].clone(),
+                        mode: self.dev_mode[i].clone(),
+                        zones: self.zones[i].clone(),
                     },
                 )
             })
@@ -271,54 +352,22 @@ impl RgbControl {
         LightingSetup {
             master: self.master,
             spread: self.spread.iter().cloned().collect(),
+            hold: self.hold,
+            battery_saver: self.battery_saver,
             devices,
         }
         .save();
     }
 
-    fn poll_connection(&mut self) {
-        if let Some(rx) = &self.rx {
-            if let Ok(res) = rx.try_recv() {
-                self.rx = None;
-                self.conn = match res {
-                    Ok((client, controllers)) => {
-                        let n = controllers.len();
-                        let mut zones: Vec<Vec<ZoneUi>> = controllers
-                            .iter()
-                            .map(|c| vec![ZoneUi::default(); c.led_count as usize])
-                            .collect();
-                        let mut dev_mode = vec![DeviceMode::PerZone; n];
-
-                        // Restore the saved setup where the device still matches.
-                        let setup = LightingSetup::load();
-                        for (i, c) in controllers.iter().enumerate() {
-                            if let Some(ds) = setup.devices.get(&c.name) {
-                                if ds.zones.len() == zones[i].len() {
-                                    zones[i] = ds.zones.clone();
-                                    dev_mode[i] = ds.mode.clone();
-                                }
-                            }
-                        }
-                        if setup.master > 0 || !setup.devices.is_empty() {
-                            self.master = setup.master.clamp(0, 100).max(1);
-                        }
-                        self.spread = setup.spread.into_iter().collect();
-
-                        Conn::Ready {
-                            client,
-                            controllers,
-                            zones,
-                            dev_mode,
-                            direct_set: vec![false; n],
-                            applied_hw: vec![None; n],
-                            last_frame: vec![Vec::new(); n],
-                        }
-                    }
-                    Err(e) => Conn::Failed(e),
-                };
-                self.dirty = true;
-            }
+    fn selected_animating(&self) -> bool {
+        if let (Conn::Ready(_), Some(DeviceMode::PerZone)) =
+            (&self.conn, self.dev_mode.get(self.selected))
+        {
+            return self.zones[self.selected]
+                .iter()
+                .any(|z| !matches!(z.kind, Kind::Solid));
         }
+        false
     }
 
     // ---- left panel: devices, custom-effect library, master ----------------
@@ -339,15 +388,16 @@ impl RgbControl {
                 ui.colored_label(Color32::from_rgb(0xff, 0x6b, 0x6b), "no OpenRGB server");
                 ui.label(RichText::new(e.as_str()).weak().small());
                 if ui.button("Retry").clicked() {
-                    self.rx = Some(spawn_connect());
+                    // Re-create the host so a returned service is picked up (and
+                    // a stalled embedded engine gets a fresh connection).
+                    self.host = host::create(self.waker.clone());
                     self.conn = Conn::Connecting;
+                    self.dirty = true;
                 }
             }
-            Conn::Ready {
-                controllers, zones, ..
-            } => {
+            Conn::Ready(controllers) => {
                 for (i, c) in controllers.iter().enumerate() {
-                    let sw = zones[i].first().map(|z| z.color).unwrap_or([80, 80, 80]);
+                    let sw = self.zones[i].first().map(|z| z.color).unwrap_or([80, 80, 80]);
                     ui.horizontal(|ui| {
                         let (rect, _) =
                             ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
@@ -412,44 +462,159 @@ impl RgbControl {
             });
     }
 
+    // ---- right panel: the persistence spine --------------------------------
+
+    fn spine_panel(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        ui.label(RichText::new("PERSISTENCE SPINE").weak().small());
+        ui.add_space(6.0);
+
+        // Ownership / connection line.
+        let via_service = self.host.via_service();
+        let (dot, text) = match &self.conn {
+            Conn::Ready(_) if via_service => (CORE_HUE, "Owner: colormemuch · service"),
+            Conn::Ready(_) => (CORE_HUE, "Owner: colormemuch"),
+            Conn::Connecting => (Color32::GRAY, "connecting…"),
+            Conn::Failed(_) => (Color32::from_rgb(0xff, 0x6b, 0x6b), "Acer (no connection)"),
+        };
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+            ui.painter().circle_filled(rect.center(), 5.0, dot);
+            ui.label(text);
+        });
+        if self.battery_saver && self.on_battery {
+            ui.label(RichText::new("⚡ on battery — reactive layer active").color(DANGER_HUE).small());
+        }
+
+        ui.add_space(10.0);
+        if ui.checkbox(&mut self.hold, "Keep my lighting").changed() {
+            self.dirty = true;
+        }
+        let hold_help = if self.hold {
+            "colormemuch re-asserts your lighting every few seconds so PredatorSense \
+             can't repaint over it — and with the service running, it holds after \
+             you close the window."
+        } else {
+            "Stop Acer from overwriting your colors: colormemuch re-asserts them, and \
+             (with the service) keeps them after the window closes."
+        };
+        ui.label(RichText::new(hold_help).weak().small());
+        if ui
+            .checkbox(&mut self.battery_saver, "Battery saver (reactive)")
+            .on_hover_text("On battery: dim and warm the composited frame.")
+            .changed()
+        {
+            self.dirty = true;
+        }
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.label(RichText::new("WHERE LAYERS LIVE").weak().small());
+        tier_row(ui, TIER_FIRMWARE, "Firmware", "survives reboot · 0 CPU");
+        tier_row(ui, TIER_DAEMON, "Daemon", "survives close (tray)");
+        tier_row(ui, Color32::from_rgb(0xef, 0x9f, 0x27), "Live", "while window open");
+
+        // Save-to-firmware, contextual to a Hardware-mode selection.
+        ui.add_space(10.0);
+        ui.separator();
+        let hw_selected = matches!(self.dev_mode.get(self.selected), Some(DeviceMode::Hardware(_)));
+        ui.label(RichText::new("BASE IDENTITY").weak().small());
+        if hw_selected {
+            if ui
+                .button(RichText::new("⬇ Save to keyboard").color(TIER_FIRMWARE))
+                .on_hover_text("Write this firmware effect to the keyboard's flash.")
+                .clicked()
+            {
+                self.request_save();
+            }
+        } else {
+            ui.label(
+                RichText::new("Pick a Hardware effect to save it to firmware.")
+                    .weak()
+                    .small(),
+            );
+        }
+        if let Some((_, msg)) = &self.save_status {
+            ui.label(RichText::new(msg.as_str()).small());
+        }
+
+        // Exclusive mode — deliberately inert (see docs/COMPOSITOR.md).
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_enabled_ui(false, |ui| {
+            let _ = ui.button(RichText::new("⚠ Exclusive mode").color(DANGER_HUE));
+        });
+        ui.label(
+            RichText::new(
+                "Advanced · coming soon. Acer's OpenRGB server is a child of its \
+                 lighting service, so true takeover needs our own server.",
+            )
+            .weak()
+            .small(),
+        );
+
+        egui::TopBottomPanel::bottom("spine_hint")
+            .frame(egui::Frame::none())
+            .show_inside(ui, |ui| {
+                ui.separator();
+                ui.label(
+                    RichText::new("Closing the window keeps colors held in the tray.")
+                        .weak()
+                        .small(),
+                );
+            });
+    }
+
+    fn request_save(&mut self) {
+        let Some(DeviceMode::Hardware(hw)) = self.dev_mode.get(self.selected) else {
+            return;
+        };
+        let spec = hw.to_spec();
+        let device = self.selected;
+        self.host.save_firmware(device, spec);
+        self.save_status = Some((Instant::now(), "Saving…".to_string()));
+    }
+
     // ---- central editor ----------------------------------------------------
 
     fn editor_view(&mut self, ui: &mut egui::Ui, t: f32) {
         let sel = self.selected;
-        let n_dev = match &self.conn {
-            Conn::Ready { controllers, .. } => controllers.len(),
-            _ => 0,
+        let controllers = match &self.conn {
+            Conn::Ready(c) => c,
+            _ => {
+                ui.centered_and_justified(|ui| {
+                    ui.label("Connect to an OpenRGB server to edit lighting.");
+                });
+                return;
+            }
         };
-        if n_dev == 0 || sel >= n_dev {
-            ui.centered_and_justified(|ui| {
-                ui.label("Connect to an OpenRGB server to edit lighting.");
-            });
+        if sel >= controllers.len() {
             return;
         }
 
-        let (dev_name, mode_names): (String, Vec<String>) = match &self.conn {
-            Conn::Ready { controllers, .. } => (
-                short_name(&controllers[sel].name),
-                controllers[sel]
-                    .mode_names()
-                    .iter()
-                    .filter(|m| !m.eq_ignore_ascii_case("direct"))
-                    .map(|s| s.to_string())
-                    .collect(),
-            ),
-            _ => (String::new(), Vec::new()),
-        };
+        let dev_name = short_name(&controllers[sel].name);
+        let mode_names: Vec<String> = controllers[sel]
+            .modes
+            .iter()
+            .filter(|m| !m.eq_ignore_ascii_case("direct"))
+            .cloned()
+            .collect();
 
-        // Header + device-mode toggle.
+        // Header + persistence-tier chip + device-mode toggle.
         ui.add_space(4.0);
+        let is_hardware = matches!(self.dev_mode[sel], DeviceMode::Hardware(_));
         ui.horizontal(|ui| {
             ui.heading(dev_name);
+            if is_hardware {
+                tier_chip(ui, TIER_FIRMWARE, "Firmware-capable");
+            } else {
+                tier_chip(ui, TIER_DAEMON, "Daemon");
+            }
             ui.label(RichText::new(format!("· clock {t:6.2}s")).weak().monospace());
         });
-        let is_hardware = matches!(self.dev_mode_of(sel), Some(DeviceMode::Hardware(_)));
         ui.horizontal(|ui| {
             if ui.selectable_label(!is_hardware, "  Per-Zone  ").clicked() && is_hardware {
-                self.set_dev_mode(sel, DeviceMode::PerZone);
+                self.dev_mode[sel] = DeviceMode::PerZone;
                 self.dirty = true;
             }
             let hw_btn = ui.selectable_label(
@@ -462,15 +627,12 @@ impl RgbControl {
             );
             if hw_btn.clicked() && !is_hardware {
                 let mode = mode_names.first().cloned().unwrap_or_else(|| "STATIC".into());
-                self.set_dev_mode(
-                    sel,
-                    DeviceMode::Hardware(HwEffect {
-                        mode,
-                        color: [0x00, 0xE5, 0xFF],
-                        speed: 5,
-                        brightness: 100,
-                    }),
-                );
+                self.dev_mode[sel] = DeviceMode::Hardware(HwEffect {
+                    mode,
+                    color: [0x00, 0xE5, 0xFF],
+                    speed: 5,
+                    brightness: 100,
+                });
                 self.dirty = true;
             }
         });
@@ -486,7 +648,7 @@ impl RgbControl {
 
     fn hardware_panel(&mut self, ui: &mut egui::Ui, sel: usize, mode_names: &[String]) {
         let mut dirty = false;
-        if let Some(DeviceMode::Hardware(hw)) = self.dev_mode_of_mut(sel) {
+        if let DeviceMode::Hardware(hw) = &mut self.dev_mode[sel] {
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.set_max_width(360.0);
                 ui.label(
@@ -524,13 +686,20 @@ impl RgbControl {
                     dirty = true;
                 }
             });
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(
+                    "Applied live now. Use “Save to keyboard” (right) to persist it to \
+                     firmware so it survives a reboot with nothing running.",
+                )
+                .weak()
+                .small(),
+            );
         }
         self.dirty |= dirty;
     }
 
     fn per_zone_panels(&mut self, ui: &mut egui::Ui, sel: usize, t: f32) {
-        // Snapshot the library (names + swatches) so we don't hold a borrow of
-        // it while mutating the zones.
         let customs: Vec<(String, [u8; 3])> = self
             .library
             .effects
@@ -541,37 +710,27 @@ impl RgbControl {
             })
             .collect();
 
-        // Build sources + the live preview frame (owned; no borrow held after).
-        let (sources, frame) = {
-            let m = self.master as f32 / 100.0;
-            match &self.conn {
-                Conn::Ready { zones, .. } => {
-                    let srcs: Vec<ZoneSource> =
-                        zones[sel].iter().map(|z| z.to_source(&self.library)).collect();
-                    let mut f = render_plan(&srcs, &self.spread, t);
-                    for c in &mut f {
-                        *c = scale(*c, m);
-                    }
-                    (srcs, f)
-                }
-                _ => (Vec::new(), Vec::new()),
-            }
-        };
+        // Local preview frame (owned; no engine involvement).
+        let m = self.master as f32 / 100.0;
+        let sources: Vec<ZoneSource> =
+            self.zones[sel].iter().map(|z| z.to_source(&self.library)).collect();
+        let mut frame = render_plan(&sources, &self.spread, t);
+        for c in &mut frame {
+            *c = scale(*c, m);
+        }
         let groups = shared_clock_groups(&sources);
         let n = sources.len();
 
         let mut local_dirty = false;
-        if let Conn::Ready { zones, .. } = &mut self.conn {
-            let zrow = &mut zones[sel];
-            egui::ScrollArea::horizontal().show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    for zi in 0..n {
-                        let preview = frame.get(zi).copied().unwrap_or(Rgb(0, 0, 0));
-                        zone_panel(ui, zi, &mut zrow[zi], preview, &groups, &customs, &mut local_dirty);
-                    }
-                });
+        let zrow = &mut self.zones[sel];
+        egui::ScrollArea::horizontal().show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for zi in 0..n {
+                    let preview = frame.get(zi).copied().unwrap_or(Rgb(0, 0, 0));
+                    zone_panel(ui, zi, &mut zrow[zi], preview, &groups, &customs, &mut local_dirty);
+                }
             });
-        }
+        });
         self.dirty |= local_dirty;
 
         // Shared-clock strip with Link/Spread per group.
@@ -669,7 +828,6 @@ impl RgbControl {
                     });
                 }
 
-                // Live preview strip (16 cells).
                 ui.add_space(8.0);
                 ui.label(RichText::new("Preview").weak().small());
                 let (rect, _) =
@@ -703,7 +861,6 @@ impl RgbControl {
             });
 
         if save && !ed.draft.name.trim().is_empty() {
-            // If renamed, drop the old entry first.
             if let Some(old) = &ed.replacing {
                 if old != &ed.draft.name {
                     self.library.remove(old);
@@ -721,105 +878,27 @@ impl RgbControl {
         if keep_open {
             self.editor = Some(ed);
         }
-        // Repaint keeps the preview animating.
     }
+}
 
-    // ---- device-mode helpers -----------------------------------------------
-
-    fn dev_mode_of(&self, i: usize) -> Option<&DeviceMode> {
-        match &self.conn {
-            Conn::Ready { dev_mode, .. } => dev_mode.get(i),
-            _ => None,
-        }
-    }
-    fn dev_mode_of_mut(&mut self, i: usize) -> Option<&mut DeviceMode> {
-        match &mut self.conn {
-            Conn::Ready { dev_mode, .. } => dev_mode.get_mut(i),
-            _ => None,
-        }
-    }
-    fn set_dev_mode(&mut self, i: usize, m: DeviceMode) {
-        if let Conn::Ready { dev_mode, .. } = &mut self.conn {
-            if let Some(slot) = dev_mode.get_mut(i) {
-                *slot = m;
-            }
-        }
-    }
-
-    // ---- hardware push -----------------------------------------------------
-
-    fn push_if_due(&mut self, t: f32, hz: f32) -> bool {
-        let lib = &self.library;
-        let spread = &self.spread;
-        let master = self.master as f32 / 100.0;
-
-        let Conn::Ready {
-            client,
-            controllers,
-            zones,
-            dev_mode,
-            direct_set,
-            applied_hw,
-            last_frame,
-        } = &mut self.conn
-        else {
-            return false;
-        };
-
-        let animating = dev_mode.iter().enumerate().any(|(i, m)| {
-            matches!(m, DeviceMode::PerZone)
-                && zones[i].iter().any(|z| !matches!(z.kind, Kind::Solid))
+fn tier_chip(ui: &mut egui::Ui, hue: Color32, label: &str) {
+    egui::Frame::none()
+        .fill(hue.linear_multiply(0.18))
+        .stroke(egui::Stroke::new(1.0_f32, hue))
+        .rounding(10.0)
+        .inner_margin(egui::Margin::symmetric(7.0, 1.0))
+        .show(ui, |ui| {
+            ui.label(RichText::new(label).color(hue).small());
         });
+}
 
-        let due = self.last_push.elapsed().as_secs_f32() >= 1.0 / hz;
-        if !due && !self.dirty {
-            return animating;
-        }
-
-        for ci in 0..controllers.len() {
-            match &dev_mode[ci] {
-                DeviceMode::Hardware(hw) => {
-                    let sig = hw.signature();
-                    if applied_hw[ci].as_deref() != Some(sig.as_str()) {
-                        let _ = client.apply_effect(
-                            &controllers[ci],
-                            &hw.mode,
-                            Rgb(hw.color[0], hw.color[1], hw.color[2]),
-                            Some(hw.speed),
-                            Some(hw.brightness),
-                        );
-                        applied_hw[ci] = Some(sig);
-                        // We left Direct mode; force re-entry if we go back.
-                        direct_set[ci] = false;
-                        last_frame[ci].clear();
-                    }
-                }
-                DeviceMode::PerZone => {
-                    applied_hw[ci] = None;
-                    let srcs: Vec<ZoneSource> =
-                        zones[ci].iter().map(|z| z.to_source(lib)).collect();
-                    let mut frame = render_plan(&srcs, spread, t);
-                    for c in &mut frame {
-                        *c = scale(*c, master);
-                    }
-                    if frame == last_frame[ci] {
-                        continue;
-                    }
-                    if !direct_set[ci] {
-                        if client.enter_direct(&controllers[ci]).is_ok() {
-                            direct_set[ci] = true;
-                        }
-                    }
-                    if client.update_leds(&controllers[ci], &frame).is_ok() {
-                        last_frame[ci] = frame;
-                    }
-                }
-            }
-        }
-        self.last_push = Instant::now();
-        self.dirty = false;
-        animating
-    }
+fn tier_row(ui: &mut egui::Ui, hue: Color32, name: &str, note: &str) {
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
+        ui.painter().circle_filled(rect.center(), 4.5, hue);
+        ui.label(RichText::new(name).small());
+        ui.label(RichText::new(note).weak().small());
+    });
 }
 
 /// One zone control card (free function so it borrows only the zone + a dirty
@@ -852,7 +931,6 @@ fn zone_panel(
             ui.set_width(W);
             ui.spacing_mut().slider_width = W - 70.0;
 
-            // Preview header.
             let (rect, _) = ui.allocate_exact_size(egui::vec2(W, 42.0), egui::Sense::hover());
             ui.painter()
                 .rect_filled(rect, 5.0, Color32::from_rgb(preview.0, preview.1, preview.2));
@@ -875,7 +953,6 @@ fn zone_panel(
 
             ui.add_space(8.0);
 
-            // Three-type selector, color-coded.
             ui.horizontal(|ui| {
                 let is_solid = matches!(z.kind, Kind::Solid);
                 let is_prog = matches!(z.kind, Kind::Program(_));
@@ -965,19 +1042,6 @@ fn zone_panel(
         });
     });
     ui.add_space(8.0);
-}
-
-fn spawn_connect() -> mpsc::Receiver<ConnResult> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let res = (|| {
-            let mut c = OpenRgb::connect().map_err(|e| e.to_string())?;
-            let ctrls = c.controllers().map_err(|e| e.to_string())?;
-            Ok((c, ctrls))
-        })();
-        let _ = tx.send(res);
-    });
-    rx
 }
 
 fn short_name(name: &str) -> String {

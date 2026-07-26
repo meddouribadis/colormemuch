@@ -1,25 +1,22 @@
 #![windows_subsystem = "windows"]
 
+// The GUI binary — a thin host over the `colormemuch` core lib. Core lighting
+// modules live in the lib; only the UI shell is here.
 mod app;
 mod config;
 mod git_update;
 #[cfg(windows)]
-mod effects;
-#[cfg(windows)]
-mod library;
-#[cfg(windows)]
-mod openrgb;
-#[cfg(windows)]
-mod rgb;
+mod tray;
 #[cfg(windows)]
 mod ui;
-#[cfg(windows)]
-mod wmi;
 
 use eframe::egui;
 
-// These constants are the single source of truth for app identity.
-// The bootstrap script (scripts/new_app.ps1) rewrites them for a new app.
+// App identity. `APP_NAME` is owned by the core lib (config/profile paths);
+// re-export it so `crate::APP_NAME` keeps working in the GUI modules.
+#[cfg(windows)]
+pub use colormemuch::APP_NAME;
+#[cfg(not(windows))]
 pub const APP_NAME: &str = "ColorMeMuch";
 pub const APP_WINDOW_TITLE: &str = "ColorMeMuch";
 // GitHub repo in "owner/repo" form — used by the update checker.

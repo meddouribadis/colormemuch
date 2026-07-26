@@ -20,6 +20,8 @@
 // yet, so silence dead-code noise until it's wired up.
 #![allow(dead_code)]
 
+use serde::{Deserialize, Serialize};
+
 use crate::wmi::{Result, Wmi};
 
 /// Width of the `UInt8Array` packet the LED/keyboard methods speak, as observed
@@ -124,7 +126,7 @@ pub fn snapshot(wmi: &Wmi, surface: Surface, max_selector: u32) -> Result<Vec<(u
 
 /// An RGB triple. Byte order in the payload is R, G, B (verified against the
 /// documented layout, not yet against hardware).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
 /// The four keyboard zones, left to right. The firmware addresses them as a

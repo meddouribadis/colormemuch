@@ -71,6 +71,41 @@
                                 Source='$(var.CargoTargetBinDir)\colormemuch.exe'
                                 KeyPath='yes'/>
                         </Component>
+
+                        <!--
+                          The always-on daemon. The MSI registers it as an
+                          auto-start LocalSystem service and starts it on install;
+                          it stops + is removed on uninstall. The service owns the
+                          lighting so a closed GUI (or a fresh boot) keeps colors.
+                          `Arguments='run'` makes the SCM launch `colormemuch-svc run`,
+                          which enters the service dispatcher.
+                        -->
+                        <Component Id='binary_svc' Guid='*'>
+                            <File
+                                Id='exe_svc'
+                                Name='colormemuch-svc.exe'
+                                DiskId='1'
+                                Source='$(var.CargoTargetBinDir)\colormemuch-svc.exe'
+                                KeyPath='yes'/>
+                            <ServiceInstall
+                                Id='SvcInstall'
+                                Name='colormemuch-svc'
+                                DisplayName='colormemuch lighting service'
+                                Description='Holds colormemuch lighting against Acer/PredatorSense and restores it at boot.'
+                                Type='ownProcess'
+                                Start='auto'
+                                ErrorControl='normal'
+                                Arguments='run'
+                                Account='LocalSystem'
+                                Vital='no'/>
+                            <ServiceControl
+                                Id='SvcControl'
+                                Name='colormemuch-svc'
+                                Start='install'
+                                Stop='both'
+                                Remove='uninstall'
+                                Wait='no'/>
+                        </Component>
                     </Directory>
 
                     <Component Id='DesktopShortcut' Guid='5305FDD6-2EDE-43D9-82D5-41371FCCBD58'>
@@ -103,6 +138,7 @@
             Display='expand'
             Absent='disallow'>
             <ComponentRef Id='binary0'/>
+            <ComponentRef Id='binary_svc'/>
             <ComponentRef Id='DesktopShortcut'/>
 
             <Feature

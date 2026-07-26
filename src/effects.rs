@@ -66,7 +66,7 @@ impl Effect {
 
 /// Parameters shared by the effects. `color`/`color_b` are used by the effects
 /// that key off a chosen color; `speed` scales time (1.0 = nominal).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Params {
     pub color: Rgb,
     pub color_b: Rgb,
@@ -217,7 +217,7 @@ pub fn play(
 /// An animated per-zone source — a built-in **Program** effect or a user
 /// **Custom** one. Both render the same `(t, n) -> frame` shape, so the engine
 /// handles them uniformly.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Fx {
     Program(Effect),
     Custom(crate::library::CustomEffect),
@@ -265,7 +265,7 @@ pub fn program_hue(e: Effect) -> Rgb {
 }
 
 /// What drives a single zone: a fixed color, or an animated function.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ZoneSource {
     Solid(Rgb),
     Function(Fx, Params),

@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <!-- WMI instance access to root\WMI:AcerGamingFunction is ACL'd to admins:
-       class metadata reads unelevated, but Get-CimInstance returns Access
-       denied, so no Get/Set method is callable without this. -->
+  <!-- Runs as the invoking user — no UAC prompt. Lighting goes through the
+       OpenRGB socket (unelevated) and the privileged, always-on work lives in
+       the LocalSystem service; the GUI needs no elevation of its own. -->
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
       </requestedPrivileges>
     </security>
   </trustInfo>
