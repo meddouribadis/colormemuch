@@ -32,27 +32,6 @@ use crate::rgb::Rgb;
 /// passes a no-op (it polls its own channel).
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
-/// A serializable, transport-friendly view of a controller — enough for the GUI
-/// to render the editor. The raw [`Controller`] stays engine-side.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ControllerInfo {
-    pub name: String,
-    pub led_count: u16,
-    pub zones: Vec<(String, u32)>,
-    pub modes: Vec<String>,
-}
-
-impl ControllerInfo {
-    pub fn of(c: &Controller) -> Self {
-        Self {
-            name: c.name.clone(),
-            led_count: c.led_count,
-            zones: c.zones.clone(),
-            modes: c.modes.iter().map(|m| m.name.clone()).collect(),
-        }
-    }
-}
-
 /// A firmware effect the controller animates host-free.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct HwSpec {

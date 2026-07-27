@@ -65,10 +65,41 @@ pub struct Controller {
     pub name: String,
     pub vendor: String,
     pub description: String,
+    pub location: String,
+    pub serial: String,
+    /// Raw OpenRGB device type (0..=19).
+    pub dev_type: i32,
     pub modes: Vec<Mode>,
-    /// `(zone name, led count)`.
-    pub zones: Vec<(String, u32)>,
+    pub active_mode: usize,
+    pub zones: Vec<ZoneDesc>,
+    /// Per-LED names, parallel to the flat LED/color vectors.
+    pub leds: Vec<String>,
+    /// Current per-LED colors (OpenRGB's last-set model, not a hardware read).
+    pub colors: Vec<Rgb>,
     pub led_count: u16,
+}
+
+/// One zone in a controller's `zones` vector, with its topology.
+#[derive(Debug, Clone)]
+pub struct ZoneDesc {
+    pub name: String,
+    /// Raw OpenRGB zone type: 0 = single, 1 = linear, 2 = matrix.
+    pub kind: i32,
+    pub leds_min: u32,
+    pub leds_max: u32,
+    pub leds_count: u32,
+    /// Start index into the controller's flat LED vector.
+    pub start: u32,
+    pub matrix: Option<MatrixDesc>,
+}
+
+/// A matrix zone's 2-D key map. `map` is row-major (height×width); `None` marks
+/// a gap (OpenRGB's `0xFFFFFFFF` sentinel, e.g. under the spacebar).
+#[derive(Debug, Clone)]
+pub struct MatrixDesc {
+    pub height: u32,
+    pub width: u32,
+    pub map: Vec<Option<u32>>,
 }
 
 impl Controller {
@@ -121,6 +152,10 @@ impl Mode {
     }
     pub fn needs_manual_save(&self) -> bool {
         self.flags & MODE_FLAG_MANUAL_SAVE != 0
+    }
+    /// Whether the mode has any direction (LR / UD / HV — bits 1..=3).
+    pub fn has_direction(&self) -> bool {
+        self.flags & 0b1110 != 0
     }
 
     /// Serialize this mode for UPDATE_MODE (no leading size/index — the caller
@@ -288,7 +323,7 @@ impl OpenRgb {
     /// Set the LEDs of a single zone. `zone` indexes into `ctrl.zones`.
     pub fn set_zone(&mut self, ctrl: &Controller, zone: usize, colors: &[Rgb]) -> io::Result<()> {
         self.send(ctrl.index, SET_CUSTOM_MODE, &[])?;
-        let n = ctrl.zones.get(zone).map(|z| z.1 as usize).unwrap_or(0);
+        let n = ctrl.zones.get(zone).map(|z| z.leds_count as usize).unwrap_or(0);
         let fallback = colors.last().copied().unwrap_or(Rgb(0, 0, 0));
 
         let mut inner = Vec::with_capacity(4 + 2 + n * 4);
@@ -441,16 +476,16 @@ fn parse_controller(index: u32, blob: &[u8]) -> io::Result<Controller> {
     let mut c = Cursor { b: blob, p: 0 };
 
     let _data_size = c.u32();
-    let _type = c.i32();
+    let dev_type = c.i32();
     let name = c.string();
     let vendor = c.string();
     let description = c.string();
     let _version = c.string();
-    let _serial = c.string();
-    let _location = c.string();
+    let serial = c.string();
+    let location = c.string();
 
     let num_modes = c.u16();
-    let _active_mode = c.i32();
+    let active_mode = c.i32().max(0) as usize;
     let mut modes = Vec::with_capacity(num_modes as usize);
     for i in 0..num_modes {
         let name = c.string();
@@ -489,26 +524,81 @@ fn parse_controller(index: u32, blob: &[u8]) -> io::Result<Controller> {
 
     let num_zones = c.u16();
     let mut zones = Vec::with_capacity(num_zones as usize);
+    let mut start = 0u32;
     for _ in 0..num_zones {
         let zone_name = c.string();
-        let _zone_type = c.i32();
-        let _leds_min = c.u32();
-        let _leds_max = c.u32();
+        let kind = c.i32();
+        let leds_min = c.u32();
+        let leds_max = c.u32();
         let leds_count = c.u32();
-        let matrix_len = c.u16();
-        c.skip(matrix_len as usize);
-        zones.push((zone_name, leds_count));
+        let matrix_len = c.u16() as usize;
+        // Matrix block (when present): height u32, width u32, then h*w LED
+        // indices — `matrix_len` == (2 + h*w) * 4.
+        let matrix = if matrix_len >= 8 {
+            let height = c.u32();
+            let width = c.u32();
+            let n = (height as usize).saturating_mul(width as usize);
+            let map = (0..n)
+                .map(|_| match c.u32() {
+                    0xFFFF_FFFF => None,
+                    v => Some(v),
+                })
+                .collect();
+            let read = 8 + n * 4;
+            if matrix_len > read {
+                c.skip(matrix_len - read);
+            }
+            Some(MatrixDesc { height, width, map })
+        } else {
+            c.skip(matrix_len);
+            None
+        };
+        zones.push(ZoneDesc {
+            name: zone_name,
+            kind,
+            leds_min,
+            leds_max,
+            leds_count,
+            start,
+            matrix,
+        });
+        start += leds_count;
     }
 
-    let led_count = c.u16();
+    // LED section: names parallel to the flat LED/color vectors.
+    let num_leds = c.u16();
+    let leds = (0..num_leds)
+        .map(|_| {
+            let n = c.string();
+            let _value = c.u32();
+            n
+        })
+        .collect::<Vec<_>>();
+
+    // Colors section: current per-LED colors (OpenRGB packs R | G<<8 | B<<16).
+    let num_colors = c.u16();
+    let colors = (0..num_colors)
+        .map(|_| {
+            let v = c.u32();
+            Rgb((v & 0xFF) as u8, ((v >> 8) & 0xFF) as u8, ((v >> 16) & 0xFF) as u8)
+        })
+        .collect();
+
+    let led_count = num_leds;
 
     Ok(Controller {
         index,
         name,
         vendor,
         description,
+        location,
+        serial,
+        dev_type,
         modes,
+        active_mode,
         zones,
+        leds,
+        colors,
         led_count,
     })
 }
@@ -542,5 +632,44 @@ mod tests {
         // Magenta — distinct from the green the PowerShell proof left.
         c.set_all(&kb, Rgb(0xFF, 0x00, 0xFF)).expect("set color");
         eprintln!("set '{}' to magenta", kb.name);
+    }
+
+    /// Golden descriptor check against the live server — proves the full parse
+    /// (zones, per-LED names, modes) holds on real hardware. Read-only.
+    ///
+    /// ```text
+    /// cargo test --lib -- --ignored --exact \
+    ///     openrgb::tests::hw_descriptor_shape --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs the local OpenRGB server; reads only"]
+    fn hw_descriptor_shape() {
+        let mut c = OpenRgb::connect().expect("connect");
+        let ctrls = c.controllers().expect("enumerate");
+        assert!(!ctrls.is_empty(), "no controllers");
+        for ctrl in &ctrls {
+            // The LED-names section must line up with the LED count.
+            assert_eq!(
+                ctrl.leds.len(),
+                ctrl.led_count as usize,
+                "LED names must match led_count for {}",
+                ctrl.name
+            );
+            // Zone LED counts must sum to the total (contiguous zones).
+            let zone_sum: u32 = ctrl.zones.iter().map(|z| z.leds_count).sum();
+            assert_eq!(zone_sum, ctrl.led_count as u32, "zone sum for {}", ctrl.name);
+        }
+        let kb = ctrls
+            .iter()
+            .find(|c| c.name.to_lowercase().contains("keyboard"))
+            .expect("keyboard controller");
+        assert!(kb.modes.iter().any(|m| m.name.eq_ignore_ascii_case("static")));
+        eprintln!(
+            "descriptor ok: {} controllers, keyboard has {} LEDs / {} zones / {} modes",
+            ctrls.len(),
+            kb.led_count,
+            kb.zones.len(),
+            kb.modes.len()
+        );
     }
 }

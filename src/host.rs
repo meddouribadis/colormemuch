@@ -12,14 +12,13 @@ use std::time::{Duration, Instant};
 
 use interprocess::local_socket::LocalSocketStream;
 
-use crate::engine::{
-    self, ControllerInfo, EngineCmd, EngineEvent, EngineHandle, EngineState, HwSpec, Waker,
-};
+use crate::engine::{self, EngineCmd, EngineEvent, EngineHandle, EngineState, HwSpec, Waker};
 use crate::ipc::{self, ClientMsg, ServerMsg};
+use crate::model::DeviceDescriptor;
 
 /// Events surfaced to the GUI, uniform across host kinds.
 pub enum HostEvent {
-    Connected(Vec<ControllerInfo>),
+    Connected(Vec<DeviceDescriptor>),
     Disconnected(String),
     OnBattery(bool),
     SaveResult(Result<bool, String>),
@@ -68,7 +67,7 @@ impl Host for EmbeddedHost {
         while let Ok(ev) = self.engine.evt.try_recv() {
             out.push(match ev {
                 EngineEvent::Connected(cs) => {
-                    HostEvent::Connected(cs.iter().map(ControllerInfo::of).collect())
+                    HostEvent::Connected(cs.iter().map(DeviceDescriptor::of).collect())
                 }
                 EngineEvent::Disconnected(e) => HostEvent::Disconnected(e),
                 EngineEvent::OnBattery(b) => HostEvent::OnBattery(b),

@@ -10,7 +10,8 @@ use std::io::{self, Read, Write};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use crate::engine::{ControllerInfo, EngineState, HwSpec};
+use crate::engine::{EngineState, HwSpec};
+use crate::model::DeviceDescriptor;
 
 /// The pipe the daemon serves and the GUI connects to. A bare name — on Windows
 /// `interprocess` places it in the `\\.\pipe\` namespace on both ends.
@@ -39,7 +40,7 @@ pub enum ServerMsg {
         error: Option<String>,
         on_battery: bool,
         /// Current controller list (the client de-dupes to detect real changes).
-        controllers: Option<Vec<ControllerInfo>>,
+        controllers: Option<Vec<DeviceDescriptor>>,
     },
     SaveResult(Result<bool, String>),
     Ok,

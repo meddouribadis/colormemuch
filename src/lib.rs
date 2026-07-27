@@ -20,6 +20,7 @@ pub mod engine;
 pub mod host;
 pub mod ipc;
 pub mod library;
+pub mod model;
 pub mod openrgb;
 pub mod rgb;
 

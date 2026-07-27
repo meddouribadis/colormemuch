@@ -16,6 +16,7 @@ fn main() {
             }
         }
         "console" => daemon::run_console(),
+        "list" => daemon::run_list(),
         "install" => match daemon::install() {
             Ok(()) => println!("installed {} (auto-start)", daemon::SERVICE_NAME),
             Err(e) => eprintln!("install failed: {e}"),
@@ -26,7 +27,7 @@ fn main() {
         },
         other => {
             eprintln!("colormemuch-svc: unknown mode {other:?}");
-            eprintln!("usage: colormemuch-svc [run|console|install|uninstall]");
+            eprintln!("usage: colormemuch-svc [run|console|list|install|uninstall]");
             std::process::exit(2);
         }
     }

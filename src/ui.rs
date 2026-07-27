@@ -25,8 +25,9 @@ use serde::{Deserialize, Serialize};
 use colormemuch::effects::{
     render_plan, scale, shared_clock_groups, Effect, Fx, Group, Params, ZoneSource,
 };
-use colormemuch::engine::{ControllerInfo, DeviceMode as EngDeviceMode, EngineState, HwSpec};
+use colormemuch::engine::{DeviceMode as EngDeviceMode, EngineState, HwSpec};
 use colormemuch::host::{self, Host, HostEvent};
+use colormemuch::model::DeviceDescriptor;
 use colormemuch::library::{ColorStop, CustomEffect, EffectLibrary, Motion};
 use colormemuch::rgb::Rgb;
 
@@ -161,7 +162,7 @@ struct EditorState {
 
 enum Conn {
     Connecting,
-    Ready(Vec<ControllerInfo>),
+    Ready(Vec<DeviceDescriptor>),
     Failed(String),
 }
 
@@ -186,6 +187,7 @@ pub struct RgbControl {
     dirty: bool,
     library: EffectLibrary,
     editor: Option<EditorState>,
+    inspector_open: bool,
 
     save_status: Option<(Instant, String)>,
 }
@@ -211,6 +213,7 @@ impl RgbControl {
             dirty: false,
             library: EffectLibrary::load(),
             editor: None,
+            inspector_open: false,
             save_status: None,
         }
     }
@@ -230,6 +233,7 @@ impl RgbControl {
         egui::CentralPanel::default().show(ctx, |ui| self.editor_view(ui, t));
 
         self.effect_editor_window(ctx, t);
+        self.devices_inspector(ctx);
 
         // Ship a fresh snapshot to the engine only when something changed — the
         // engine's own hold timer handles re-asserting against Acer, so an idle
@@ -312,7 +316,7 @@ impl RgbControl {
 
     /// Size the per-device UI state to the controllers, restoring the saved
     /// setup wherever a device still matches.
-    fn rebuild_devices(&mut self, controllers: &[ControllerInfo]) {
+    fn rebuild_devices(&mut self, controllers: &[DeviceDescriptor]) {
         let setup = LightingSetup::load();
         let mut zones: Vec<Vec<ZoneUi>> = controllers
             .iter()
@@ -320,7 +324,13 @@ impl RgbControl {
             .collect();
         let mut dev_mode = vec![DeviceMode::PerZone; controllers.len()];
         for (i, c) in controllers.iter().enumerate() {
-            if let Some(ds) = setup.devices.get(&c.name) {
+            // Prefer the topology signature; fall back to the old name key for
+            // one-time migration of pre-P1 profiles.
+            let ds = setup
+                .devices
+                .get(&c.topology_sig())
+                .or_else(|| setup.devices.get(&c.name));
+            if let Some(ds) = ds {
                 if ds.zones.len() == zones[i].len() {
                     zones[i] = ds.zones.clone();
                     dev_mode[i] = ds.mode.clone();
@@ -341,7 +351,7 @@ impl RgbControl {
             .enumerate()
             .map(|(i, c)| {
                 (
-                    c.name.clone(),
+                    c.topology_sig(),
                     DeviceSetup {
                         mode: self.dev_mode[i].clone(),
                         zones: self.zones[i].clone(),
@@ -374,7 +384,16 @@ impl RgbControl {
 
     fn side_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
-        ui.label(RichText::new("DEVICES").weak().small());
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("DEVICES").weak().small());
+            if ui
+                .small_button("inspect")
+                .on_hover_text("Show the discovered device tree (read-only)")
+                .clicked()
+            {
+                self.inspector_open = !self.inspector_open;
+            }
+        });
         ui.add_space(4.0);
 
         match &self.conn {
@@ -593,12 +612,7 @@ impl RgbControl {
         }
 
         let dev_name = short_name(&controllers[sel].name);
-        let mode_names: Vec<String> = controllers[sel]
-            .modes
-            .iter()
-            .filter(|m| !m.eq_ignore_ascii_case("direct"))
-            .cloned()
-            .collect();
+        let mode_names: Vec<String> = controllers[sel].effect_mode_names();
 
         // Header + persistence-tier chip + device-mode toggle.
         ui.add_space(4.0);
@@ -710,6 +724,16 @@ impl RgbControl {
             })
             .collect();
 
+        // Real per-LED names from the discovered descriptor (owned so we don't
+        // hold a `self.conn` borrow while mutating `self.zones`).
+        let led_names: Vec<String> = match &self.conn {
+            Conn::Ready(cs) => cs
+                .get(sel)
+                .map(|d| d.leds.iter().map(|l| l.name.clone()).collect())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+
         // Local preview frame (owned; no engine involvement).
         let m = self.master as f32 / 100.0;
         let sources: Vec<ZoneSource> =
@@ -727,7 +751,10 @@ impl RgbControl {
             ui.horizontal_wrapped(|ui| {
                 for zi in 0..n {
                     let preview = frame.get(zi).copied().unwrap_or(Rgb(0, 0, 0));
-                    zone_panel(ui, zi, &mut zrow[zi], preview, &groups, &customs, &mut local_dirty);
+                    let label = led_names.get(zi).map(|s| s.as_str()).unwrap_or("");
+                    zone_panel(
+                        ui, zi, label, &mut zrow[zi], preview, &groups, &customs, &mut local_dirty,
+                    );
                 }
             });
         });
@@ -879,6 +906,79 @@ impl RgbControl {
             self.editor = Some(ed);
         }
     }
+
+    // ---- devices inspector (read-only discovery surface) -------------------
+
+    fn devices_inspector(&mut self, ctx: &egui::Context) {
+        if !self.inspector_open {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Discovered devices")
+            .open(&mut open)
+            .default_width(440.0)
+            .show(ctx, |ui| {
+                let Conn::Ready(controllers) = &self.conn else {
+                    ui.label("Not connected to an OpenRGB server.");
+                    return;
+                };
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for d in controllers {
+                        ui.label(
+                            RichText::new(format!("{}  ·  {}", d.name, d.kind.label())).strong(),
+                        );
+                        if !d.vendor.is_empty() || !d.description.is_empty() {
+                            ui.label(
+                                RichText::new(format!("{} — {}", d.vendor, d.description))
+                                    .weak()
+                                    .small(),
+                            );
+                        }
+                        for z in &d.zones {
+                            let m = z
+                                .matrix
+                                .as_ref()
+                                .map(|m| format!("  ·  matrix {}×{}", m.height, m.width))
+                                .unwrap_or_default();
+                            ui.label(format!(
+                                "   zone: {} [{}] · {} LEDs{}",
+                                z.name,
+                                z.kind.label(),
+                                z.leds_count,
+                                m
+                            ));
+                        }
+                        let names: Vec<&str> = d.leds.iter().map(|l| l.name.as_str()).collect();
+                        ui.label(RichText::new(format!("   LEDs: {}", names.join(", "))).small());
+                        ui.collapsing(format!("modes ({})", d.modes.len()), |ui| {
+                            for md in &d.modes {
+                                let mut caps = Vec::new();
+                                if md.has_speed {
+                                    caps.push("speed");
+                                }
+                                if md.has_brightness {
+                                    caps.push("brightness");
+                                }
+                                if md.has_direction {
+                                    caps.push("direction");
+                                }
+                                if md.takes_color {
+                                    caps.push("color");
+                                }
+                                if md.can_save {
+                                    caps.push("save");
+                                }
+                                ui.label(format!("   {} [{}]", md.name, caps.join(", ")));
+                            }
+                        });
+                        ui.separator();
+                    }
+                });
+            });
+        if !open {
+            self.inspector_open = false;
+        }
+    }
 }
 
 fn tier_chip(ui: &mut egui::Ui, hue: Color32, label: &str) {
@@ -903,9 +1003,11 @@ fn tier_row(ui: &mut egui::Ui, hue: Color32, name: &str, note: &str) {
 
 /// One zone control card (free function so it borrows only the zone + a dirty
 /// flag, never `self`).
+#[allow(clippy::too_many_arguments)]
 fn zone_panel(
     ui: &mut egui::Ui,
     zi: usize,
+    label: &str,
     z: &mut ZoneUi,
     preview: Rgb,
     groups: &[Group],
@@ -939,11 +1041,16 @@ fn zone_panel(
             } else {
                 Color32::from_white_alpha(220)
             };
+            let title = if label.is_empty() {
+                format!("Zone {}", zi + 1)
+            } else {
+                label.to_string()
+            };
             ui.painter().text(
                 rect.left_top() + egui::vec2(8.0, 6.0),
                 egui::Align2::LEFT_TOP,
-                format!("Zone {}", zi + 1),
-                egui::FontId::proportional(13.0),
+                title,
+                egui::FontId::proportional(12.0),
                 ink,
             );
             if let Some(h) = group_hue {
@@ -1044,13 +1151,10 @@ fn zone_panel(
     ui.add_space(8.0);
 }
 
+/// Generic display cleanup — trim the common " Device" suffix OpenRGB appends.
+/// No vendor-specific surgery; the descriptor's name is the source of truth.
 fn short_name(name: &str) -> String {
-    name.trim_end_matches(" Device")
-        .replace("AcerHID", "")
-        .replace("CoverLogoLED", "Cover Logo")
-        .replace("ModeKeyLED", "Mode Key")
-        .trim()
-        .to_string()
+    name.trim_end_matches(" Device").trim().to_string()
 }
 
 fn luminance(c: Rgb) -> f32 {

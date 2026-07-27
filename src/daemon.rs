@@ -32,8 +32,9 @@ use windows::Win32::System::Pipes::{
     PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 
-use crate::engine::{self, ControllerInfo, EngineCmd, EngineEvent, EngineHandle, EngineState};
+use crate::engine::{self, EngineCmd, EngineEvent, EngineHandle, EngineState};
 use crate::ipc::{self, ClientMsg, ServerMsg};
+use crate::model::DeviceDescriptor;
 
 pub const SERVICE_NAME: &str = "colormemuch-svc";
 const DISPLAY_NAME: &str = "colormemuch lighting service";
@@ -44,7 +45,7 @@ struct Snapshot {
     connected: bool,
     error: Option<String>,
     on_battery: bool,
-    controllers: Option<Vec<ControllerInfo>>,
+    controllers: Option<Vec<DeviceDescriptor>>,
 }
 
 // --- the serve loop, shared by service + console ---------------------------
@@ -72,7 +73,7 @@ pub fn serve(stop: Arc<AtomicBool>) {
                     EngineEvent::Connected(cs) => {
                         s.connected = true;
                         s.error = None;
-                        s.controllers = Some(cs.iter().map(ControllerInfo::of).collect());
+                        s.controllers = Some(cs.iter().map(DeviceDescriptor::of).collect());
                     }
                     EngineEvent::Disconnected(e) => {
                         s.connected = false;
@@ -221,6 +222,76 @@ fn ctrlc_stop(stop: Arc<AtomicBool>) -> std::io::Result<()> {
         thread::sleep(Duration::from_millis(150));
     });
     Ok(())
+}
+
+// --- read-only discovery dump ----------------------------------------------
+
+/// `colormemuch-svc list` — connect read-only, enumerate, and print the full
+/// device descriptor tree. Writes nothing to the hardware.
+pub fn run_list() {
+    let mut client = match crate::openrgb::OpenRgb::connect() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("connect failed: {e} (is an OpenRGB server on :6742?)");
+            return;
+        }
+    };
+    let controllers = match client.controllers() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("enumerate failed: {e}");
+            return;
+        }
+    };
+    println!(
+        "{} controller(s) on {}",
+        controllers.len(),
+        crate::openrgb::DEFAULT_ADDR
+    );
+    for c in &controllers {
+        let d = DeviceDescriptor::of(c);
+        println!("\n[{}] {}  ({})", d.index, d.name, d.kind.label());
+        if !d.vendor.is_empty() || !d.description.is_empty() {
+            println!("    {} — {}", d.vendor, d.description);
+        }
+        println!("    zones ({}):", d.zones.len());
+        for z in &d.zones {
+            let m = z
+                .matrix
+                .as_ref()
+                .map(|m| format!(" matrix {}x{}", m.height, m.width))
+                .unwrap_or_default();
+            println!(
+                "      - {} [{}] {} LEDs{}",
+                z.name,
+                z.kind.label(),
+                z.leds_count,
+                m
+            );
+        }
+        let names: Vec<&str> = d.leds.iter().map(|l| l.name.as_str()).collect();
+        println!("    LEDs ({}): {}", d.leds.len(), names.join(", "));
+        println!("    modes ({}):", d.modes.len());
+        for md in &d.modes {
+            let mut caps = Vec::new();
+            if md.has_speed {
+                caps.push("speed");
+            }
+            if md.has_brightness {
+                caps.push("brightness");
+            }
+            if md.has_direction {
+                caps.push("direction");
+            }
+            if md.takes_color {
+                caps.push("color");
+            }
+            if md.can_save {
+                caps.push("save");
+            }
+            println!("      - {} [{}]", md.name, caps.join(","));
+        }
+    }
 }
 
 // --- machine-wide profile store --------------------------------------------
