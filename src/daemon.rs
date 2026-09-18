@@ -46,6 +46,8 @@ struct Snapshot {
     error: Option<String>,
     on_battery: bool,
     controllers: Option<Vec<DeviceDescriptor>>,
+    dt_available: bool,
+    dt_error: Option<String>,
 }
 
 // --- the serve loop, shared by service + console ---------------------------
@@ -80,6 +82,10 @@ pub fn serve(stop: Arc<AtomicBool>) {
                         s.error = Some(e);
                     }
                     EngineEvent::OnBattery(b) => s.on_battery = b,
+                    EngineEvent::DtStatus { available, error } => {
+                        s.dt_available = available;
+                        s.dt_error = error;
+                    }
                 }
             }
         });
@@ -157,6 +163,8 @@ fn handle_conn<S: Read + Write>(mut conn: S, cmd: Sender<EngineCmd>, snapshot: A
                     error: s.error.clone(),
                     on_battery: s.on_battery,
                     controllers: s.controllers.clone(),
+                    dt_available: s.dt_available,
+                    dt_error: s.dt_error.clone(),
                 }
             }
             ClientMsg::SetState(state) => {

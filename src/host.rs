@@ -22,6 +22,8 @@ pub enum HostEvent {
     Disconnected(String),
     OnBattery(bool),
     SaveResult(Result<bool, String>),
+    /// Desktop-tower (WMI) channel state — drives the case section.
+    DtStatus { available: bool, error: Option<String> },
 }
 
 pub trait Host {
@@ -71,6 +73,9 @@ impl Host for EmbeddedHost {
                 }
                 EngineEvent::Disconnected(e) => HostEvent::Disconnected(e),
                 EngineEvent::OnBattery(b) => HostEvent::OnBattery(b),
+                EngineEvent::DtStatus { available, error } => {
+                    HostEvent::DtStatus { available, error }
+                }
             });
         }
         if let Some(rx) = &self.save_rx {
@@ -116,6 +121,7 @@ pub struct ConnectedHost {
     /// Controller-name signature, to emit `Connected` only on real change.
     last_ctrls: Option<Vec<String>>,
     last_batt: Option<bool>,
+    last_dt: Option<(bool, Option<String>)>,
     pending_save: Option<Result<bool, String>>,
 }
 
@@ -130,6 +136,7 @@ impl ConnectedHost {
             alive: true,
             last_ctrls: None,
             last_batt: None,
+            last_dt: None,
             pending_save: None,
         })
     }
@@ -161,6 +168,8 @@ impl Host for ConnectedHost {
                 error,
                 on_battery,
                 controllers,
+                dt_available,
+                dt_error,
             }) => {
                 match controllers {
                     Some(cs) => {
@@ -181,6 +190,14 @@ impl Host for ConnectedHost {
                 if self.last_batt != Some(on_battery) {
                     self.last_batt = Some(on_battery);
                     out.push(HostEvent::OnBattery(on_battery));
+                }
+                let dt_sig = (dt_available, dt_error.clone());
+                if self.last_dt.as_ref() != Some(&dt_sig) {
+                    self.last_dt = Some(dt_sig);
+                    out.push(HostEvent::DtStatus {
+                        available: dt_available,
+                        error: dt_error,
+                    });
                 }
                 out
             }

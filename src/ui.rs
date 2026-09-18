@@ -26,6 +26,7 @@ use colormemuch::effects::{
     render_plan, scale, shared_clock_groups, Effect, Fx, Group, Params, ZoneSource,
 };
 use colormemuch::engine::{DeviceMode as EngDeviceMode, EngineState, HwSpec};
+use colormemuch::dt::DtState;
 use colormemuch::host::{self, Host, HostEvent};
 use colormemuch::model::DeviceDescriptor;
 use colormemuch::library::{ColorStop, CustomEffect, EffectLibrary, Motion};
@@ -125,6 +126,26 @@ struct LightingSetup {
     #[serde(default)]
     battery_saver: bool,
     devices: std::collections::HashMap<String, DeviceSetup>,
+    /// Desktop-tower case (PO5-660) global static color. `None` = the case
+    /// section was never enabled — the engine leaves the hardware alone.
+    #[serde(default)]
+    dt: Option<DtSetup>,
+}
+
+/// Persisted form of the case section (plain array color for serde comfort).
+#[derive(Clone, Serialize, Deserialize)]
+struct DtSetup {
+    color: [u8; 3],
+    on: bool,
+}
+
+impl DtSetup {
+    fn to_state(&self) -> DtState {
+        DtState {
+            color: Rgb(self.color[0], self.color[1], self.color[2]),
+            on: self.on,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -183,6 +204,11 @@ pub struct RgbControl {
     battery_saver: bool,
     on_battery: bool,
 
+    /// Desktop-tower case section: channel state from the host, user setup.
+    dt_available: bool,
+    dt_error: Option<String>,
+    dt: Option<DtSetup>,
+
     clock: Instant,
     dirty: bool,
     library: EffectLibrary,
@@ -209,6 +235,9 @@ impl RgbControl {
             hold: setup.hold,
             battery_saver: setup.battery_saver,
             on_battery: false,
+            dt_available: false,
+            dt_error: None,
+            dt: setup.dt,
             clock: Instant::now(),
             dirty: false,
             library: EffectLibrary::load(),
@@ -270,6 +299,7 @@ impl RgbControl {
             spread: self.spread.clone(),
             hold: self.hold,
             battery_saver: self.battery_saver,
+            dt: self.dt.as_ref().map(DtSetup::to_state),
         }
     }
 
@@ -297,9 +327,13 @@ impl RgbControl {
                     }
                 }
                 HostEvent::OnBattery(b) => self.on_battery = b,
+                HostEvent::DtStatus { available, error } => {
+                    self.dt_available = available;
+                    self.dt_error = error;
+                }
                 HostEvent::SaveResult(res) => {
                     let msg = match res {
-                        Ok(true) => "Saved to keyboard flash — survives reboot.".to_string(),
+                        Ok(true) => "Saved to device flash — survives reboot.".to_string(),
                         Ok(false) => "This effect can't be saved to firmware.".to_string(),
                         Err(e) => format!("Save failed: {e}"),
                     };
@@ -365,6 +399,7 @@ impl RgbControl {
             hold: self.hold,
             battery_saver: self.battery_saver,
             devices,
+            dt: self.dt.clone(),
         }
         .save();
     }
@@ -526,6 +561,49 @@ impl RgbControl {
             self.dirty = true;
         }
 
+        // Desktop-tower case (PO5-660, WMI): global static color. The channel
+        // only exists when the engine runs elevated (service, or an elevated
+        // GUI) — otherwise the section says so instead of failing silently.
+        ui.add_space(10.0);
+        ui.separator();
+        ui.label(RichText::new("CASE (PO5-660)").weak().small());
+        if !self.dt_available {
+            ui.label(
+                RichText::new("Case channel unavailable (needs the service or an elevated app).")
+                    .weak()
+                    .small(),
+            );
+        } else {
+            let mut enabled = self.dt.is_some();
+            if ui
+                .checkbox(&mut enabled, "Case lighting")
+                .on_hover_text("Drive the tower's global static color over WMI (RAM excluded).")
+                .changed()
+            {
+                self.dt = enabled.then(|| {
+                    DtSetup {
+                        color: [0x00, 0xE5, 0xFF],
+                        on: true,
+                    }
+                });
+                self.dirty = true;
+            }
+            if let Some(dt) = &mut self.dt {
+                ui.horizontal(|ui| {
+                    ui.label("Color");
+                    if ui.color_edit_button_srgb(&mut dt.color).changed() {
+                        self.dirty = true;
+                    }
+                    if ui.checkbox(&mut dt.on, "On").changed() {
+                        self.dirty = true;
+                    }
+                });
+            }
+            if let Some(msg) = &self.dt_error {
+                ui.label(RichText::new(msg.as_str()).color(DANGER_HUE).small());
+            }
+        }
+
         ui.add_space(10.0);
         ui.separator();
         ui.label(RichText::new("WHERE LAYERS LIVE").weak().small());
@@ -540,8 +618,8 @@ impl RgbControl {
         ui.label(RichText::new("BASE IDENTITY").weak().small());
         if hw_selected {
             if ui
-                .button(RichText::new("⬇ Save to keyboard").color(TIER_FIRMWARE))
-                .on_hover_text("Write this firmware effect to the keyboard's flash.")
+                .button(RichText::new("⬇ Save to device").color(TIER_FIRMWARE))
+                .on_hover_text("Write this firmware effect to the device's flash.")
                 .clicked()
             {
                 self.request_save();
@@ -666,7 +744,7 @@ impl RgbControl {
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.set_max_width(360.0);
                 ui.label(
-                    RichText::new("CORE effect — runs on the keyboard controller, no host CPU")
+                    RichText::new("CORE effect — runs on the device controller, no host CPU")
                         .color(CORE_HUE)
                         .small(),
                 );
@@ -703,7 +781,7 @@ impl RgbControl {
             ui.add_space(6.0);
             ui.label(
                 RichText::new(
-                    "Applied live now. Use “Save to keyboard” (right) to persist it to \
+                    "Applied live now. Use “Save to device” (right) to persist it to \
                      firmware so it survives a reboot with nothing running.",
                 )
                 .weak()
@@ -1152,9 +1230,19 @@ fn zone_panel(
 }
 
 /// Generic display cleanup — trim the common " Device" suffix OpenRGB appends.
-/// No vendor-specific surgery; the descriptor's name is the source of truth.
+/// Acer desktop towers expose `AcerDTGlobal`, `AcerDTArea1..5`, `AcerDTDIMM`:
+/// give them short human names. No other vendor-specific surgery; the
+/// descriptor's name stays the source of truth for identity.
 fn short_name(name: &str) -> String {
-    name.trim_end_matches(" Device").trim().to_string()
+    let base = name.trim_end_matches(" Device").trim();
+    if let Some(n) = base.strip_prefix("AcerDTArea") {
+        return format!("Area {n}");
+    }
+    match base {
+        "AcerDTGlobal" => "Global (all areas)".to_string(),
+        "AcerDTDIMM" => "DIMM / RAM".to_string(),
+        _ => base.to_string(),
+    }
 }
 
 fn luminance(c: Rgb) -> f32 {

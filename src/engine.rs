@@ -23,9 +23,11 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::effects::{render_plan, scale, Effect, Fx, ZoneSource};
+use crate::dt::{self, DtState};
 use crate::library::Motion;
 use crate::openrgb::{Controller, OpenRgb};
 use crate::rgb::Rgb;
+use crate::wmi::Wmi;
 
 /// A UI-agnostic "something changed, wake up and drain events" nudge. The
 /// embedded host wires this to `egui::Context::request_repaint`; the daemon
@@ -70,6 +72,10 @@ pub struct EngineState {
     pub hold: bool,
     /// Reactive layer: on battery, dim + warm the composited frame.
     pub battery_saver: bool,
+    /// Desktop-tower case (PO5-660) global static color. `None` = don't touch
+    /// the case (laptop hardware, or the user never enabled it).
+    #[serde(default)]
+    pub dt: Option<DtState>,
 }
 
 pub enum EngineCmd {
@@ -89,6 +95,10 @@ pub enum EngineEvent {
     Disconnected(String),
     /// True when the last loop saw AC unplugged (drives the spine's readout).
     OnBattery(bool),
+    /// Desktop-tower (WMI) channel state. Sent once at startup (available iff
+    /// this process is elevated on Acer DT hardware) and again whenever a DT
+    /// write fails or recovers (error carries the last failure, None clears).
+    DtStatus { available: bool, error: Option<String> },
 }
 
 pub struct EngineHandle {
@@ -103,6 +113,10 @@ impl EngineHandle {
 }
 
 const HOLD_PERIOD: Duration = Duration::from_secs(3);
+/// Minimum gap between two desktop-tower (WMI) transactions — the color
+/// picker streams while dragging and the firmware flickers under back-to-back
+/// writes. Pending values coalesce: change detection re-fires until applied.
+const DT_MIN_INTERVAL: Duration = Duration::from_millis(400);
 const IDLE_TICK: Duration = Duration::from_millis(900);
 const RECONNECT_WAIT: Duration = Duration::from_secs(2);
 const MIN_HZ: f32 = 8.0;
@@ -121,6 +135,29 @@ pub fn spawn(wake: Waker) -> EngineHandle {
 }
 
 fn run(wake: Waker, cmd_rx: Receiver<EngineCmd>, evt_tx: Sender<EngineEvent>) {
+    // Desktop-tower (WMI) channel: probe once up front so the UI knows whether
+    // the case section applies. Fails gracefully unelevated / off-target.
+    let wmi: Option<Wmi> = match Wmi::connect() {
+        Ok(c) => {
+            let _ = evt_tx.send(EngineEvent::DtStatus {
+                available: true,
+                error: None,
+            });
+            Some(c)
+        }
+        Err(e) => {
+            let _ = evt_tx.send(EngineEvent::DtStatus {
+                available: false,
+                error: Some(e.to_string()),
+            });
+            None
+        }
+    };
+    let mut last_dt: Option<DtState> = None;
+    let mut last_dt_push = Instant::now() - DT_MIN_INTERVAL;
+    let mut dt_error: Option<String> = None;
+    (wake)();
+
     loop {
         // --- connect (retry until the UI channel closes) --------------------
         let (mut client, controllers) = match connect() {
@@ -219,10 +256,96 @@ fn run(wake: Waker, cmd_rx: Receiver<EngineCmd>, evt_tx: Sender<EngineEvent>) {
                 (wake)();
                 break;
             }
+            push_dt(
+                &wmi,
+                &state,
+                force,
+                &mut last_dt,
+                &mut last_dt_push,
+                &mut dt_error,
+                &evt_tx,
+                &wake,
+            );
             if force {
                 last_forced = Instant::now();
             }
         }
+    }
+}
+
+/// Apply the desktop-tower case state (PO5-660, WMI) if the UI asked for it.
+///
+/// `wmi` is `None` unelevated / off-target — then a requested DT state
+/// surfaces one sticky error instead of failing silently. Writes go through
+/// the captured static-global transaction only (see [`dt`]).
+///
+/// Rate-limited: the egui color picker streams dozens of values per second
+/// while dragging, and the firmware visibly chokes on back-to-back
+/// transactions. At most one push per [`DT_MIN_INTERVAL`]; the pending value
+/// lands on a later tick (change detection keeps it, so nothing is lost).
+#[allow(clippy::too_many_arguments)]
+fn push_dt(
+    wmi: &Option<Wmi>,
+    state: &EngineState,
+    force: bool,
+    last_dt: &mut Option<DtState>,
+    last_push: &mut Instant,
+    dt_error: &mut Option<String>,
+    evt_tx: &Sender<EngineEvent>,
+    wake: &Waker,
+) {
+    let Some(want) = &state.dt else {
+        return;
+    };
+    if !force && last_dt.as_ref() == Some(want) {
+        return;
+    }
+    if !force && last_push.elapsed() < DT_MIN_INTERVAL {
+        return;
+    }
+    let Some(w) = wmi else {
+        set_dt_error(dt_error, evt_tx, wake, Some("case unavailable: not elevated".into()));
+        return;
+    };
+    let res = if want.on {
+        dt::apply_static_global(w, want.color)
+    } else {
+        // OFF mirrors PredatorSense: same behavior template, flags flipped.
+        // The template targets static-global; reuse it, then cut the output.
+        w.call_bytes("SetGamingLedBehavior", &dt::BEHAVIOR_STATIC_GLOBAL)
+            .and_then(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                w.call_packed(
+                    "SetGamingRgbSetting",
+                    dt::pack_setting(dt::area::ALL, want.color, dt::flags::OFF),
+                )
+            })
+    };
+    match res {
+        Ok(_) => {
+            *last_dt = Some(want.clone());
+            *last_push = Instant::now();
+            set_dt_error(dt_error, evt_tx, wake, None);
+        }
+        Err(e) => set_dt_error(dt_error, evt_tx, wake, Some(e.to_string())),
+    }
+}
+
+/// Report a DT status change only when the error text actually changes, so a
+/// wedged firmware doesn't spam the UI every tick.
+fn set_dt_error(
+    dt_error: &mut Option<String>,
+    evt_tx: &Sender<EngineEvent>,
+    wake: &Waker,
+    next: Option<String>,
+) {
+    if *dt_error != next {
+        *dt_error = next.clone();
+        let _ = evt_tx.send(EngineEvent::DtStatus {
+            available: true,
+            error: next,
+        });
+        (wake)();
     }
 }
 

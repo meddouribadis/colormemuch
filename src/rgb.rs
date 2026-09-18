@@ -561,4 +561,253 @@ mod tests {
         let path = fire_matrix_and_report(&shots);
         eprintln!("report written: {}", path.display());
     }
+
+    /// DESKTOP (PO5-660) BEHAVIOR MATRIX — finds the `SetGamingLedBehavior`
+    /// array shape by echoing the getter's own bytes.
+    ///
+    /// Context: on the PO5-660 the color register (`SetGamingRgbSetting`, u64
+    /// `[sel16][R][G][B][flags]`) is decoded and proven, and `GetGamingLed-
+    /// Behavior` returns a live 8-byte blob `[00][01][mode][03][03][00][FF][00]`
+    /// where byte 2 is the effect id (00=static, 02=breathing, 06=rainbow,
+    /// 09=wave — all observed via PredatorSense A/B). But the SETTER takes a
+    /// `UInt8Array` whose length/layout is unknown (PowerShell CIM can't even
+    /// marshal byte[] to it — hence Rust + raw SAFEARRAY here).
+    ///
+    /// Shots (all reversible via PredatorSense; start from wave-red):
+    /// 1. wave echo (control) — expect accepted, no visible change.
+    /// 2. static echo — expect accepted AND wave -> static red.
+    /// 3. sel-prefixed static echo — if (2) is rejected, maybe the array wants
+    ///    an area selector up front.
+    ///
+    /// `#[ignore]` by default. Run ELEVATED:
+    ///
+    /// ```text
+    /// cargo test --lib -- --ignored --exact \
+    ///     rgb::tests::hw_dt_behavior_matrix --nocapture
+    /// ```
+    ///
+    /// Reads `kbmatrix-<epoch>.txt` (crate root) for the gmOutput column.
+    #[test]
+    #[ignore = "writes real hardware; run explicitly and elevated"]
+    fn hw_dt_behavior_matrix() {
+        let m = "SetGamingLedBehavior";
+        let shots = vec![
+            shot(
+                "wave echo control (expect accepted, no visible change)",
+                m,
+                Payload::Bytes(vec![0x00, 0x01, 0x09, 0x03, 0x03, 0x00, 0xFF, 0x00]),
+                3000,
+            ),
+            shot(
+                "static echo (expect accepted AND wave->static red)",
+                m,
+                Payload::Bytes(vec![0x00, 0x01, 0x00, 0x03, 0x03, 0x00, 0xFF, 0x00]),
+                3000,
+            ),
+            shot(
+                "sel-prefixed static echo",
+                m,
+                Payload::Bytes(vec![0x01, 0x00, 0x01, 0x00, 0x03, 0x03, 0x00, 0xFF, 0x00]),
+                3000,
+            ),
+        ];
+
+        let path = fire_matrix_and_report(&shots);
+        eprintln!("report written: {}", path.display());
+    }
+
+    /// DESKTOP (PO5-660) SHAPE PROBE — separates "Rust invoke path broken"
+    /// from "behavior array has the wrong length".
+    ///
+    /// Shot 0 calls `GetGamingRgbSetting` (packed u64, no array involved): if
+    /// it echoes the live color register, the whole Rust invoke path (connect,
+    /// in-params, out-params) is proven and the 0x80041008s from the behavior
+    /// matrix are purely about the array shape. If it fails too, the problem
+    /// is marshaling, not length.
+    ///
+    /// Shots 1..N send zero-filled arrays of many lengths to
+    /// `SetGamingLedBehavior`. A wrong length dies in parameter validation
+    /// (0x80041008) WITHOUT touching hardware; the accepted length executes
+    /// (a zeroed behavior most likely reads as static/off-ish — reversible
+    /// via PredatorSense, and the gmOutput column flags exactly which shot
+    /// acted). Pauses are short: only the shape matters here, not the eye.
+    ///
+    /// `#[ignore]` by default. Run ELEVATED:
+    ///
+    /// ```text
+    /// cargo test --lib -- --ignored --exact \
+    ///     rgb::tests::hw_dt_shape_probe --nocapture
+    /// ```
+    #[test]
+    #[ignore = "writes real hardware; run explicitly and elevated"]
+    fn hw_dt_shape_probe() {
+        let mut shots = vec![shot(
+            "GET RgbSetting sel1 via Rust (expect live color register)",
+            "GetGamingRgbSetting",
+            Payload::Packed(1),
+            500,
+        )];
+        for len in [4usize, 8, 9, 10, 12, 15, 16, 24, 32, 40] {
+            shots.push(shot(
+                &format!("SET LedBehavior zeroed len={len}"),
+                "SetGamingLedBehavior",
+                Payload::Bytes(vec![0u8; len]),
+                300,
+            ));
+        }
+
+        let path = fire_matrix_and_report(&shots);
+        eprintln!("report written: {}", path.display());
+    }
+
+    /// DESKTOP (PO5-660) BEHAVIOR-16 MATRIX — `SetGamingLedBehavior` demands a
+    /// 16-byte array (every other length dies with 0x80041008; len 16 answers
+    /// with a firmware status word instead — proven by `hw_dt_shape_probe`).
+    ///
+    /// The 8-byte `GetGamingLedBehavior` blob is half the story. Candidates
+    /// for the full 16 bytes, from wave-red start (all reversible):
+    /// a. wave echo + 8 zero pad — control: accepted + no visible change.
+    /// b. static echo + 8 zero pad — accepted + wave -> static red.
+    /// c. 8 zero pad + wave echo — echo in the high half instead.
+    /// d. wave echo doubled — both halves carry the blob.
+    ///
+    /// `#[ignore]` by default. Run ELEVATED:
+    ///
+    /// ```text
+    /// cargo test --lib -- --ignored --exact \
+    ///     rgb::tests::hw_dt_behavior16_matrix --nocapture
+    /// ```
+    #[test]
+    #[ignore = "writes real hardware; run explicitly and elevated"]
+    fn hw_dt_behavior16_matrix() {
+        const WAVE: [u8; 8] = [0x00, 0x01, 0x09, 0x03, 0x03, 0x00, 0xFF, 0x00];
+        const STATIC: [u8; 8] = [0x00, 0x01, 0x00, 0x03, 0x03, 0x00, 0xFF, 0x00];
+        const PAD: [u8; 8] = [0; 8];
+        let cat = |a: &[u8], b: &[u8]| {
+            let mut v = Vec::with_capacity(16);
+            v.extend_from_slice(a);
+            v.extend_from_slice(b);
+            v
+        };
+
+        let m = "SetGamingLedBehavior";
+        let shots = vec![
+            shot("wave echo + pad (control: no visible change)", m, Payload::Bytes(cat(&WAVE, &PAD)), 3000),
+            shot("static echo + pad (wave -> static red?)", m, Payload::Bytes(cat(&STATIC, &PAD)), 3000),
+            shot("pad + wave echo (high half?)", m, Payload::Bytes(cat(&PAD, &WAVE)), 3000),
+            shot("wave echo doubled", m, Payload::Bytes(cat(&WAVE, &WAVE)), 3000),
+        ];
+
+        let path = fire_matrix_and_report(&shots);
+        eprintln!("report written: {}", path.display());
+    }
+
+    /// DESKTOP (PO5-660) BEHAVIOR-HIGH-HALF MATRIX — the low 8 bytes carry the
+    /// behavior echo (high-half echo is rejected with 0x1), but echo + zero
+    /// pad is accepted with NO visible change. So the high 8 bytes are NOT
+    /// padding: either an area mask (zeros = apply nowhere) or a combined
+    /// color slot. From wave-red start:
+    /// e. static echo + 8×0xFF — mask-all-ones theory: -> static red?
+    /// f. static echo + [sel1, red, on] — combined theory: -> static red?
+    /// g. wave echo + [sel1, red, on] — control: no visible change either way.
+    ///
+    /// `#[ignore]` by default. Run ELEVATED:
+    ///
+    /// ```text
+    /// cargo test --lib -- --ignored --exact \
+    ///     rgb::tests::hw_dt_behavior_hi_matrix --nocapture
+    /// ```
+    #[test]
+    #[ignore = "writes real hardware; run explicitly and elevated"]
+    fn hw_dt_behavior_hi_matrix() {
+        const WAVE: [u8; 8] = [0x00, 0x01, 0x09, 0x03, 0x03, 0x00, 0xFF, 0x00];
+        const STATIC: [u8; 8] = [0x00, 0x01, 0x00, 0x03, 0x03, 0x00, 0xFF, 0x00];
+        // sel1 (u16 LE) + red + flags 09, as decoded for SetGamingRgbSetting.
+        const SEL1_RED_ON: [u8; 8] = [0x01, 0x00, 0xFF, 0x00, 0x00, 0x09, 0x00, 0x00];
+        let cat = |a: &[u8], b: &[u8]| {
+            let mut v = Vec::with_capacity(16);
+            v.extend_from_slice(a);
+            v.extend_from_slice(b);
+            v
+        };
+
+        let m = "SetGamingLedBehavior";
+        let shots = vec![
+            shot("static + FF mask (mask theory)", m, Payload::Bytes(cat(&STATIC, &[0xFF; 8])), 4000),
+            shot("static + sel1/red/on (combined theory)", m, Payload::Bytes(cat(&STATIC, &SEL1_RED_ON)), 4000),
+            shot("wave + sel1/red/on (control: no change)", m, Payload::Bytes(cat(&WAVE, &SEL1_RED_ON)), 4000),
+        ];
+
+        let path = fire_matrix_and_report(&shots);
+        eprintln!("report written: {}", path.display());
+    }
+
+    /// DESKTOP (PO5-660) SINGLE STATIC SHOT — one accepted-shape write plus
+    /// full before/after probes (taken separately) to map its scope.
+    ///
+    /// Sends static echo + zero pad (the shape the firmware accepts). Watch
+    /// MOTION per zone (wave-red -> static-red keeps the color, only the
+    /// animation stops), then diff the pre/post probe files: every selector
+    /// whose behavior byte 2 flipped 09 -> 00 was touched by this write.
+    ///
+    /// `#[ignore]` by default. Run ELEVATED:
+    ///
+    /// ```text
+    /// cargo test --lib -- --ignored --exact \
+    ///     rgb::tests::hw_dt_one_shot --nocapture
+    /// ```
+    #[test]
+    #[ignore = "writes real hardware; run explicitly and elevated"]
+    fn hw_dt_one_shot() {
+        let shots = vec![shot(
+            "static echo + pad (single)",
+            "SetGamingLedBehavior",
+            Payload::Bytes(vec![
+                0x00, 0x01, 0x00, 0x03, 0x03, 0x00, 0xFF, 0x00, //
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ]),
+            1000,
+        )];
+
+        let path = fire_matrix_and_report(&shots);
+        eprintln!("report written: {}", path.display());
+    }
+
+    /// DESKTOP (PO5-660) HIGH-HALF CANDIDATES — two single-purpose shots from
+    /// uniform wave-red (reuse the last post-probe as baseline):
+    /// 1. static echo + 8×0xFF — mask theory: all zones -> static red?
+    /// 2. static echo + [sel2, blue, on] — combined theory: top fan alone ->
+    ///    static blue (sel2 = top/GPU fan, proven by the color walk)?
+    ///
+    /// Watch MOTION + COLOR per zone on each shot, then probe once and diff
+    /// against baseline: which selectors changed, and how.
+    ///
+    /// `#[ignore]` by default. Run ELEVATED:
+    ///
+    /// ```text
+    /// cargo test --lib -- --ignored --exact \
+    ///     rgb::tests::hw_dt_two_shot --nocapture
+    /// ```
+    #[test]
+    #[ignore = "writes real hardware; run explicitly and elevated"]
+    fn hw_dt_two_shot() {
+        const STATIC: [u8; 8] = [0x00, 0x01, 0x00, 0x03, 0x03, 0x00, 0xFF, 0x00];
+        // sel2 (top/GPU fan, u16 LE) + blue + flags 09, per the RgbSetting layout.
+        const SEL2_BLUE_ON: [u8; 8] = [0x02, 0x00, 0x00, 0x00, 0xFF, 0x09, 0x00, 0x00];
+        let cat = |a: &[u8], b: &[u8]| {
+            let mut v = Vec::with_capacity(16);
+            v.extend_from_slice(a);
+            v.extend_from_slice(b);
+            v
+        };
+
+        let m = "SetGamingLedBehavior";
+        let shots = vec![
+            shot("static + FFmask (all -> static red?)", m, Payload::Bytes(cat(&STATIC, &[0xFF; 8])), 5000),
+            shot("static + sel2/blue/on (top -> static blue?)", m, Payload::Bytes(cat(&STATIC, &SEL2_BLUE_ON)), 5000),
+        ];
+
+        let path = fire_matrix_and_report(&shots);
+        eprintln!("report written: {}", path.display());
+    }
 }

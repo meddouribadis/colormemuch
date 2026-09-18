@@ -34,6 +34,12 @@ pub struct DeviceDescriptor {
 
 impl DeviceDescriptor {
     pub fn of(c: &Controller) -> Self {
+        // Acer's desktop tower DIMM controller reports type 0 (motherboard);
+        // fix the label from the name so the UI shows "RAM".
+        let mut kind = DeviceKind::from_i32(c.dev_type);
+        if kind == DeviceKind::Motherboard && c.name.to_uppercase().contains("DIMM") {
+            kind = DeviceKind::Dram;
+        }
         Self {
             index: c.index,
             name: c.name.clone(),
@@ -41,7 +47,7 @@ impl DeviceDescriptor {
             description: c.description.clone(),
             location: c.location.clone(),
             serial: c.serial.clone(),
-            kind: DeviceKind::from_i32(c.dev_type),
+            kind,
             zones: c.zones.iter().map(ZoneInfo::of).collect(),
             leds: c.leds.iter().map(|n| LedInfo { name: n.clone() }).collect(),
             modes: c.modes.iter().map(ModeInfo::of).collect(),

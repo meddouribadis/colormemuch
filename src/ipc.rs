@@ -41,6 +41,10 @@ pub enum ServerMsg {
         on_battery: bool,
         /// Current controller list (the client de-dupes to detect real changes).
         controllers: Option<Vec<DeviceDescriptor>>,
+        /// Desktop-tower (WMI) channel: true when the daemon is elevated on
+        /// Acer DT hardware. Carries the last DT error, if any.
+        dt_available: bool,
+        dt_error: Option<String>,
     },
     SaveResult(Result<bool, String>),
     Ok,
