@@ -25,4 +25,5 @@ pub mod openrgb;
 pub mod rgb;
 
 pub mod daemon;
+pub mod dt;
 pub mod wmi;
