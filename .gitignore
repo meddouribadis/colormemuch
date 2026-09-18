@@ -6,6 +6,18 @@
 # baselines (probe-*.txt) are committed on purpose; these are throwaway results
 # meant to be pasted back, not versioned.
 kbwrite-*.txt
+kbmatrix-*.txt
+
+# PO5-660 desktop-tower session captures (red/green A/B, dig dumps, marks).
+dt-*.txt
+po5-660-dig.txt
+wmi_mark.txt
+
+# User-side RE tooling outputs and environments.
+Logfile*.CSV
+Logfile*.csv
+.venv-frida/
+.freebuff/
 
 # Transient RE capture outputs (WMI traces, OpenRGB dumps). Keep the scripts, not the noise.
 wmitrace-*.txt
