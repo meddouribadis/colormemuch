@@ -307,20 +307,20 @@ fn push_dt(
         set_dt_error(dt_error, evt_tx, wake, Some("case unavailable: not elevated".into()));
         return;
     };
-    let res = if want.on {
-        dt::apply_static_global(w, want.color)
+    // Global first (if requested), then per-area overrides in order — each a
+    // full captured-shape transaction. Slow by design (see throttling above);
+    // a 5-area push costs ~0.5 s of WMI round-trips.
+    let mut res = if want.on {
+        dt::apply_static(w, dt::area::ALL, want.color, true)
     } else {
-        // OFF mirrors PredatorSense: same behavior template, flags flipped.
-        // The template targets static-global; reuse it, then cut the output.
-        w.call_bytes("SetGamingLedBehavior", &dt::BEHAVIOR_STATIC_GLOBAL)
-            .and_then(|_| {
-                std::thread::sleep(std::time::Duration::from_millis(60));
-                w.call_packed(
-                    "SetGamingRgbSetting",
-                    dt::pack_setting(dt::area::ALL, want.color, dt::flags::OFF),
-                )
-            })
+        dt::apply_static(w, dt::area::ALL, want.color, false)
     };
+    for a in &want.areas {
+        if res.is_err() {
+            break;
+        }
+        res = dt::apply_static(w, a.area, a.color, a.on);
+    }
     match res {
         Ok(_) => {
             *last_dt = Some(want.clone());
@@ -454,7 +454,20 @@ fn fx_hz(fx: &Fx) -> f32 {
 fn connect() -> Result<(OpenRgb, Vec<Controller>), String> {
     let mut c = OpenRgb::connect().map_err(|e| e.to_string())?;
     let ctrls = c.controllers().map_err(|e| e.to_string())?;
-    Ok((c, ctrls))
+    // Desktop towers (PO5-660) expose AcerDTGlobal / AcerDTArea1..5 /
+    // AcerDTDIMM on the OpenRGB server, but the server is a showroom there:
+    // every write is accepted and nothing reaches the LEDs (proven on
+    // hardware — PredatorSense drives them over WMI instead, see `dt`).
+    // Listing them would offer dead controls next to the live CASE section,
+    // so they are filtered here, once, for every host. Laptop controllers
+    // (AcerHID*) and third-party ones (Logitech, …) are untouched.
+    let (live, dead): (Vec<_>, Vec<_>) = ctrls
+        .into_iter()
+        .partition(|c| !c.name.to_uppercase().starts_with("ACERDT"));
+    for d in &dead {
+        eprintln!("engine: hiding inert OpenRGB controller '{}' (WMI owns it)", d.name);
+    }
+    Ok((c, live))
 }
 
 /// AC line status via the Win32 power API. `ACLineStatus == 0` means offline

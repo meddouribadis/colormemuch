@@ -75,6 +75,19 @@ use serde::{Deserialize, Serialize};
 pub struct DtState {
     pub color: Rgb,
     pub on: bool,
+    /// Per-area overrides, applied after the global (if any), in order.
+    /// FRONT is capture-backed; TOP/REAR/AUX are experimental until their
+    /// own Frida captures land (same shape, unconfirmed sel semantics).
+    #[serde(default)]
+    pub areas: Vec<AreaCmd>,
+}
+
+/// One per-area static command.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AreaCmd {
+    pub area: u16,
+    pub color: Rgb,
+    pub on: bool,
 }
 
 impl Default for DtState {
@@ -82,6 +95,7 @@ impl Default for DtState {
         Self {
             color: Rgb(0x00, 0xE5, 0xFF),
             on: true,
+            areas: Vec::new(),
         }
     }
 }
@@ -122,6 +136,21 @@ pub const BEHAVIOR_STATIC_GLOBAL: [u8; 16] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
+/// Static behavior template with the area selector patched in.
+///
+/// Proven by a second Frida capture: PredatorSense changing only the front
+/// ("zone 1" in its UI) red → teal sends the global template byte-identical
+/// except bytes 0-1 = `[04 00]`, followed by the rgb word with sel = 4.
+/// Per-area transactions are therefore the global shape with patched sel —
+/// for the color word (captured) and, by the same capture, the behavior word.
+/// Selectors beyond global + front are the same shape but await their own
+/// capture before shipping (see [`area`]).
+pub fn behavior_static_for(area: u16) -> [u8; 16] {
+    let mut b = BEHAVIOR_STATIC_GLOBAL;
+    b[0..2].copy_from_slice(&area.to_le_bytes());
+    b
+}
+
 /// Effect ids from read-only `GetGamingLedBehavior` byte-2 A/B. Knowledge
 /// only — the write path replays [`BEHAVIOR_STATIC_GLOBAL`], never these.
 pub mod effect {
@@ -159,11 +188,23 @@ pub fn unpack_echo(word: u64) -> (Rgb, u8) {
 /// order (behavior first, color ~60 ms later). Only [`area::ALL`] is
 /// capture-backed. Reversible via PredatorSense.
 pub fn apply_static_global(wmi: &Wmi, color: Rgb) -> Result<u64> {
-    wmi.call_bytes("SetGamingLedBehavior", &BEHAVIOR_STATIC_GLOBAL)?;
+    apply_static(wmi, area::ALL, color, true)
+}
+
+/// Apply a static color to one area: behavior template with patched sel,
+/// then the color word, PredatorSense order.
+///
+/// `on = false` mirrors PredatorSense OFF (behavior untouched in its
+/// snapshots — but our template targets a static state already, so the
+/// template write is a no-op semantically; only the flags flip the output).
+/// FRONT is capture-backed; TOP/REAR/AUX share the proven shape but are
+/// marked experimental until their own captures land.
+pub fn apply_static(wmi: &Wmi, area: u16, color: Rgb, on: bool) -> Result<u64> {
+    wmi.call_bytes("SetGamingLedBehavior", &behavior_static_for(area))?;
     std::thread::sleep(std::time::Duration::from_millis(60));
     wmi.call_packed(
         "SetGamingRgbSetting",
-        pack_setting(area::ALL, color, flags::ON),
+        pack_setting(area, color, if on { flags::ON } else { flags::OFF }),
     )
 }
 
@@ -211,25 +252,46 @@ mod tests {
         assert!(BEHAVIOR_STATIC_GLOBAL[8..].iter().all(|&b| b == 0));
     }
 
-    /// Proves the captured transaction end to end on real hardware: global
-    /// static blue (unmistakably ours), then read-back. From any PredatorSense
-    /// static state; restore via PredatorSense afterwards.
+    #[test]
+    fn behavior_sel_patch_matches_front_capture() {
+        // Second Frida capture: PredatorSense changing only the front
+        // ("zone 1" in its UI) red -> teal sends the global template
+        // byte-identical except sel = [04 00].
+        let front = behavior_static_for(area::FRONT);
+        let mut expect = BEHAVIOR_STATIC_GLOBAL;
+        expect[0..2].copy_from_slice(&[0x04, 0x00]);
+        assert_eq!(front, expect);
+    }
+
+    #[test]
+    fn pack_setting_reproduces_front_capture() {
+        // Same capture's color word: sel 4 + teal (0, 174, 199) + ON + X.
+        assert_eq!(
+            pack_setting(area::FRONT, Rgb(0x00, 0xAE, 0xC7), flags::ON),
+            0x000309C7AE000004
+        );
+    }
+
+    /// Proves the per-area transaction on real hardware: front static blue
+    /// (unmistakably ours), then read-back on sel 4. From any PredatorSense
+    /// static state; restore via PredatorSense afterwards. FRONT is the only
+    /// capture-backed area — TOP/REAR/AUX wait for their own captures.
     ///
     /// `#[ignore]` by default. Run ELEVATED:
     ///
     /// ```text
     /// cargo test --lib -- --ignored --exact \
-    ///     dt::tests::hw_apply_static_blue --nocapture
+    ///     dt::tests::hw_apply_front_blue --nocapture
     /// ```
     #[test]
     #[ignore = "writes real hardware; run explicitly and elevated"]
-    fn hw_apply_static_blue() {
+    fn hw_apply_front_blue() {
         let wmi = Wmi::connect().expect("elevated WMI connect");
         let blue = Rgb(0x00, 0x00, 0xFF);
-        let status = apply_static_global(&wmi, blue).expect("static blue tx");
-        eprintln!("tx status: 0x{status:X} — case (minus RAM) should be BLUE now");
-        let (back, fl) = get_color(&wmi, area::ALL).expect("read back");
+        let status = apply_static(&wmi, area::FRONT, blue, true).expect("static front blue tx");
+        eprintln!("tx status: 0x{status:X} — front should be BLUE now, rest untouched");
+        let (back, fl) = get_color(&wmi, area::FRONT).expect("read back");
         assert_eq!((back, fl), (blue, flags::ON));
-        eprintln!("read-back OK: blue + ON. Restore via PredatorSense.");
+        eprintln!("read-back OK: front blue + ON. Restore via PredatorSense.");
     }
 }

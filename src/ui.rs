@@ -26,7 +26,7 @@ use colormemuch::effects::{
     render_plan, scale, shared_clock_groups, Effect, Fx, Group, Params, ZoneSource,
 };
 use colormemuch::engine::{DeviceMode as EngDeviceMode, EngineState, HwSpec};
-use colormemuch::dt::DtState;
+use colormemuch::dt::{AreaCmd, DtState};
 use colormemuch::host::{self, Host, HostEvent};
 use colormemuch::model::DeviceDescriptor;
 use colormemuch::library::{ColorStop, CustomEffect, EffectLibrary, Motion};
@@ -137,6 +137,10 @@ struct LightingSetup {
 struct DtSetup {
     color: [u8; 3],
     on: bool,
+    /// Per-area overrides (TOP/FRONT/REAR/AUX). FRONT is capture-backed;
+    /// the rest are experimental until their own Frida captures land.
+    #[serde(default)]
+    areas: Vec<AreaCmd>,
 }
 
 impl DtSetup {
@@ -144,6 +148,7 @@ impl DtSetup {
         DtState {
             color: Rgb(self.color[0], self.color[1], self.color[2]),
             on: self.on,
+            areas: self.areas.clone(),
         }
     }
 }
@@ -584,6 +589,7 @@ impl RgbControl {
                     DtSetup {
                         color: [0x00, 0xE5, 0xFF],
                         on: true,
+                        areas: Vec::new(),
                     }
                 });
                 self.dirty = true;
@@ -598,6 +604,15 @@ impl RgbControl {
                         self.dirty = true;
                     }
                 });
+                ui.label(RichText::new("Per-area (front proven, rest experimental):").weak().small());
+                for (sel, label) in [
+                    (colormemuch::dt::area::TOP, "Dessus"),
+                    (colormemuch::dt::area::FRONT, "Façade"),
+                    (colormemuch::dt::area::REAR, "Arrière"),
+                    (colormemuch::dt::area::AUX, "Aux"),
+                ] {
+                    self.dt_area_row(ui, sel, label);
+                }
             }
             if let Some(msg) = &self.dt_error {
                 ui.label(RichText::new(msg.as_str()).color(DANGER_HUE).small());
@@ -660,6 +675,42 @@ impl RgbControl {
                         .small(),
                 );
             });
+    }
+
+    /// One per-area row in the CASE section: enable toggle + color + on/off.
+    /// Enabling pushes a default entry (dirty → engine applies the captured
+    /// transaction with patched sel); disabling removes it (the global shows
+    /// through again — restore the area via PredatorSense if it was custom).
+    fn dt_area_row(&mut self, ui: &mut egui::Ui, sel: u16, label: &str) {
+        let Some(dt) = &mut self.dt else { return };
+        let pos = dt.areas.iter().position(|a| a.area == sel);
+        let mut enabled = pos.is_some();
+        ui.horizontal(|ui| {
+            if ui.checkbox(&mut enabled, label).changed() {
+                if enabled {
+                    dt.areas.push(AreaCmd {
+                        area: sel,
+                        color: Rgb(0x00, 0xE5, 0xFF),
+                        on: true,
+                    });
+                } else if let Some(i) = pos {
+                    dt.areas.remove(i);
+                }
+                self.dirty = true;
+            }
+            if let Some(entry) = dt.areas.iter_mut().find(|a| a.area == sel) {
+                let mut c = [entry.color.0, entry.color.1, entry.color.2];
+                if ui.color_edit_button_srgb(&mut c).changed() {
+                    entry.color = Rgb(c[0], c[1], c[2]);
+                    self.dirty = true;
+                }
+                let mut on = entry.on;
+                if ui.checkbox(&mut on, "On").changed() {
+                    entry.on = on;
+                    self.dirty = true;
+                }
+            }
+        });
     }
 
     fn request_save(&mut self) {
