@@ -44,6 +44,8 @@ plumbing and should stay generic.
   personal: `1540596+ophiocus@users.noreply.github.com`. Remotes use the
   `github-ssdnodes` SSH alias — never rewrite one to HTTPS.
 
+- Adopt [conventional commits](https://www.conventionalcommits.org/) for all git messages.
+
 ## Upstream / retrofit
 
 `upstream` is [ophiocus/rust-skeleton](https://github.com/ophiocus/rust-skeleton).
