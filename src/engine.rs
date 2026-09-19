@@ -193,9 +193,9 @@ fn run(wake: Waker, cmd_rx: Receiver<EngineCmd>, evt_tx: Sender<EngineEvent>) {
             } else {
                 IDLE_TICK
             };
-            // A debounced case write is waiting: wake in time to flush it.
-            if dt_track.pending() {
-                tick = tick.min(DT_SETTLE);
+            // A debounced case write is waiting: wake right as it settles.
+            if let Some(d) = dt_track.wake_in() {
+                tick = tick.min(d);
             }
 
             match cmd_rx.recv_timeout(tick) {
@@ -332,12 +332,17 @@ struct DtTracker {
 }
 
 impl DtTracker {
-    /// True while a request is waiting to settle or retry — the loop shortens
-    /// its tick so the flush isn't left to the next idle wake-up.
-    fn pending(&self) -> bool {
-        self.seen.is_some()
-            && self.seen != self.applied
-            && !self.retry_at.is_some_and(|t| Instant::now() < t)
+    /// How long the loop may sleep before a pending write needs flushing:
+    /// `None` when nothing is waiting (or a retry backoff is running), else
+    /// the remaining settle time, so the write lands right as the request
+    /// stops moving instead of up to a full extra `DT_SETTLE` later.
+    fn wake_in(&self) -> Option<Duration> {
+        let waiting = self.seen.is_some() && self.seen != self.applied;
+        if !waiting || self.retry_at.is_some_and(|t| Instant::now() < t) {
+            return None;
+        }
+        let elapsed = self.changed_at.map(|t| t.elapsed()).unwrap_or(DT_SETTLE);
+        Some(DT_SETTLE.saturating_sub(elapsed).max(Duration::from_millis(5)))
     }
 
     fn push(
@@ -355,6 +360,7 @@ impl DtTracker {
             self.applied = None;
             self.seen = None;
             self.changed_at = None;
+            self.retry_at = None;
             return;
         };
         let resolved = resolve_dt(want, state.master);
@@ -422,21 +428,30 @@ impl DtTracker {
                 // Keep what did land so the retry only re-sends the failed
                 // tail instead of blinking every zone again.
                 let landed = &plan[..done];
-                let partial = if landed.first().is_some_and(|z| z.area == dt::area::ALL) {
+                if done == 0 {
+                    // Nothing changed on the hardware; `applied` stands.
+                } else if landed[0].area == dt::area::ALL {
                     // A broadcast landed: it repainted every area, so only the
                     // overrides written after it are still on the hardware.
-                    landed.to_vec()
-                } else {
-                    let mut p = self.applied.clone().unwrap_or_else(|| vec![resolved[0].clone()]);
+                    self.applied = Some(landed.to_vec());
+                } else if let Some(p) = &mut self.applied {
+                    // Area-only plan (`applied` is always Some here). A landed
+                    // write for an area that still has an override is patched
+                    // in; a landed *re-cover* (override removed) means the area
+                    // now follows the global — drop it, or the retry would
+                    // treat it as uncovered and send it again.
                     for z in landed {
-                        match p.iter_mut().find(|q| q.area == z.area) {
-                            Some(slot) => *slot = z.clone(),
-                            None => p.push(z.clone()),
+                        let still_overridden = resolved[1..].iter().any(|r| r.area == z.area);
+                        if still_overridden {
+                            match p.iter_mut().find(|q| q.area == z.area) {
+                                Some(slot) => *slot = z.clone(),
+                                None => p.push(z.clone()),
+                            }
+                        } else {
+                            p.retain(|q| q.area != z.area);
                         }
                     }
-                    p
-                };
-                self.applied = if done == 0 && self.applied.is_none() { None } else { Some(partial) };
+                }
                 self.retry_at = Some(Instant::now() + DT_RETRY);
                 set_dt_error(dt_error, evt_tx, wake, Some(e));
             }
@@ -455,9 +470,9 @@ fn write_zones(w: &Wmi, zones: &[ZoneWrite]) -> Result<(), (usize, String)> {
 }
 
 /// One DT zone write with its effect gate. Non-static effects have no capture
-/// behind them, so they report an honest error (sticky-deduped by the caller)
-/// instead of firing guessed firmware bytes. Returns `Err(())` for gate
-/// rejections so the caller surfaces them exactly like transport failures.
+/// behind them, so they report an honest error instead of firing guessed
+/// firmware bytes. Gate rejections and transport failures both come back as
+/// `Err(String)`; [`DtTracker`] surfaces them (deduped) and owns the retry.
 fn apply_dt_zone(
     w: &Wmi,
     area: u16,
