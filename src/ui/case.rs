@@ -170,7 +170,13 @@ impl RgbControl {
         }
 
         if let Some(msg) = self.dt_error.clone() {
-            widgets::banner(ui, tk.danger, "The case didn't accept the last change", &msg);
+            // The engine shares one status line for write failures and for
+            // hold's read-back notes; the latter are informational.
+            if msg.contains("re-assert") {
+                widgets::banner(ui, tk.warn, "Hold isn't verifying part of the case", &msg);
+            } else {
+                widgets::banner(ui, tk.danger, "The case didn't accept the last change", &msg);
+            }
         }
     }
 

@@ -66,13 +66,15 @@ loop {
 - **Hold** = re-push every ~3 s even when the frame is unchanged, so within 3 s
   of any Acer reassert (including resume-from-sleep) our profile is back. Cheap:
   three 15-byte writes. Off → we only push on change (today's behavior).
-  **Exception — the tower case (WMI, `dt`):** hold does *not* replay it. Each
-  WMI transaction blanks its zone while the firmware re-applies the mode, so a
-  3 s replay was a 3 s blink. The case is firmware state and keeps itself; the
-  engine's `DtTracker` debounces requests and writes only zones whose resolved
-  state changed. A read-back-based re-assert (`GetGamingRgbSetting` per area,
-  rewrite only on divergence) is the intended follow-up once the per-area echo
-  is confirmed on hardware.
+  **Exception — the tower case (WMI, `dt`):** hold does *not* blindly replay
+  it. Each WMI transaction blanks its zone while the firmware re-applies the
+  mode, so a 3 s replay was a 3 s blink. Instead the engine's `DtTracker`
+  *verifies*: every 4 s it reads each applied zone back (`GetGamingRgbSetting`,
+  side-effect free) and rewrites only zones whose echo diverged from what we
+  applied — an untouched case never blinks; an Acer repaint is undone within
+  ~4 s. Because it's unconfirmed whether the getter echoes per selector, a zone
+  that still disagrees after two rewrites is marked unreadable and left alone
+  (surfaced in the UI), so a wrong assumption costs at most two blinks.
 - Runs on a worker thread, so a hidden/minimized window keeps holding and the
   GUI thread can idle. **This is what makes colors not vanish when the window
   is closed** — closing hides to tray; only tray-Quit stops the engine.

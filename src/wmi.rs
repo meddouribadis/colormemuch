@@ -267,6 +267,19 @@ impl Wmi {
         self.read_output_scalar(&out)
     }
 
+    /// Invoke a *reader* taking a `UInt32 gmInput` and returning a scalar
+    /// `UInt64 gmOutput` — the shape of `GetGamingRgbSetting` (the desktop
+    /// tower's color-register echo, see [`crate::dt::get_color`]). Read-only:
+    /// nothing here touches firmware state.
+    pub fn call_u32(&self, method: &str, gm_input: u32) -> Result<u64> {
+        let out = self.invoke(method, |in_params| unsafe {
+            let v = VARIANT::from(gm_input as i32);
+            put_input(in_params, &v)?;
+            Ok(())
+        })?;
+        self.read_output_scalar(&out)
+    }
+
     /// Invoke a *reader* taking a `UInt32 gmInput` and returning a
     /// `UInt8Array gmOutput` plus a `UInt8 gmReturn` status.
     ///

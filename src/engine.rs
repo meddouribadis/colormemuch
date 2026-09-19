@@ -120,6 +120,14 @@ const HOLD_PERIOD: Duration = Duration::from_secs(3);
 const DT_SETTLE: Duration = Duration::from_millis(220);
 /// After a failed DT write, wait this long before replaying the whole state.
 const DT_RETRY: Duration = Duration::from_secs(2);
+/// With Hold on, how often the case registers are read back and compared to
+/// what we applied. Reads are free of side effects; only a diverged zone is
+/// rewritten — so an untouched case never blinks.
+const DT_VERIFY_PERIOD: Duration = Duration::from_secs(4);
+/// A zone whose echo still disagrees after this many consecutive rewrites is
+/// judged unreadable (the getter isn't reflecting that selector) and dropped
+/// from re-assert rather than rewritten forever.
+const DT_VERIFY_STRIKES: u8 = 2;
 const IDLE_TICK: Duration = Duration::from_millis(900);
 const RECONNECT_WAIT: Duration = Duration::from_secs(2);
 const MIN_HZ: f32 = 8.0;
@@ -264,7 +272,9 @@ fn run(wake: Waker, cmd_rx: Receiver<EngineCmd>, evt_tx: Sender<EngineEvent>) {
             }
             // The case is firmware state — it keeps itself, so the hold
             // re-push (`force`) deliberately does not apply to it: a replay
-            // would blank the LEDs every HOLD_PERIOD for nothing.
+            // would blank the LEDs every HOLD_PERIOD for nothing. Hold instead
+            // *verifies* the case by read-back and rewrites only what diverged.
+            dt_track.verify(&wmi, state.hold, &mut dt_error, &evt_tx, &wake);
             dt_track.push(&wmi, &state, &mut dt_error, &evt_tx, &wake);
             if force {
                 last_forced = Instant::now();
@@ -315,7 +325,13 @@ fn resolve_dt(want: &DtState, master: f32) -> Vec<ZoneWrite> {
 ///    sends the broadcast and then re-applies every override the broadcast
 ///    just repainted. A removed override is re-covered by writing the global
 ///    values to that one area (same end state as a broadcast, no blink).
-/// 3. **No hold replay** — the case is firmware state; it keeps itself.
+/// 3. **Verify, don't replay** — with Hold on, the case registers are read
+///    back every [`DT_VERIFY_PERIOD`] and only zones whose echo diverges from
+///    what we applied are rewritten (PredatorSense repainted). Because it's
+///    unconfirmed whether `GetGamingRgbSetting` echoes per selector, a zone
+///    that still disagrees after [`DT_VERIFY_STRIKES`] rewrites is marked
+///    unreadable and left alone — a wrong assumption can cost at most two
+///    blinks, never a blink loop.
 ///
 /// `wmi` is `None` unelevated / off-target — then a requested DT state
 /// surfaces one sticky error instead of failing silently. Writes go through
@@ -329,9 +345,106 @@ struct DtTracker {
     changed_at: Option<Instant>,
     /// After a failure, don't retry before this.
     retry_at: Option<Instant>,
+
+    // ---- read-back re-assert (Hold) ----
+    last_verify: Option<Instant>,
+    /// Consecutive verify passes in which this area's echo disagreed right
+    /// after we rewrote it. Reset on agreement or on any user change.
+    strikes: Vec<(u16, u8)>,
+    /// Areas whose echo never reflects our writes — excluded from verify.
+    unreadable: Vec<u16>,
+    /// The getter itself failed: verification is off for this session.
+    verify_broken: bool,
+    /// The pending write was requested by [`Self::verify`], not the user —
+    /// its success must not clear the strikes it is counting.
+    verify_rewrite: bool,
 }
 
 impl DtTracker {
+    fn verify_note(&self) -> Option<String> {
+        verify_note(self.verify_broken, &self.unreadable)
+    }
+
+    /// Hold's re-assert for the case. Reads each applied zone's register and,
+    /// where the hardware disagrees with `applied`, records what the hardware
+    /// shows — the very next [`Self::push`] then plans exactly the writes
+    /// needed to bring it back (global diverged → broadcast + overrides;
+    /// one area diverged → that area). Nothing diverged → nothing written.
+    fn verify(
+        &mut self,
+        wmi: &Option<Wmi>,
+        hold: bool,
+        dt_error: &mut Option<String>,
+        evt_tx: &Sender<EngineEvent>,
+        wake: &Waker,
+    ) {
+        let Some(w) = wmi else { return };
+        if !hold || self.verify_broken || self.seen != self.applied {
+            return;
+        }
+        if self.retry_at.is_some_and(|t| Instant::now() < t) {
+            return;
+        }
+        if self.last_verify.is_some_and(|t| t.elapsed() < DT_VERIFY_PERIOD) {
+            return;
+        }
+        let Some(applied) = &mut self.applied else { return };
+        self.last_verify = Some(Instant::now());
+
+        for z in applied.iter_mut() {
+            if self.unreadable.contains(&z.area) {
+                continue;
+            }
+            let (color, flags) = match dt::get_color(w, z.area) {
+                Ok(v) => v,
+                Err(e) => {
+                    // Can't read — don't guess, don't hammer. Hold stays
+                    // honest for OpenRGB devices; the case just isn't verified.
+                    self.verify_broken = true;
+                    set_dt_error(
+                        dt_error,
+                        evt_tx,
+                        wake,
+                        Some(format!("case read-back unavailable ({e}) — hold won't re-assert the case")),
+                    );
+                    return;
+                }
+            };
+            let on = flags == dt::flags::ON;
+            let expected_flags = if z.on { dt::flags::ON } else { dt::flags::OFF };
+            if color == z.color && flags == expected_flags {
+                // Agreement: clear any strike against this area.
+                self.strikes.retain(|(a, _)| *a != z.area);
+                continue;
+            }
+            // Diverged. Count it; give up on the selector if a rewrite didn't
+            // change what it echoes.
+            let n = match self.strikes.iter_mut().find(|(a, _)| *a == z.area) {
+                Some((_, n)) => {
+                    *n += 1;
+                    *n
+                }
+                None => {
+                    self.strikes.push((z.area, 1));
+                    1
+                }
+            };
+            if n > DT_VERIFY_STRIKES {
+                self.unreadable.push(z.area);
+                self.strikes.retain(|(a, _)| *a != z.area);
+                // Leave `applied` at the expected value: we stop judging this
+                // selector, we don't rewrite it. (Free fn: `applied` is
+                // still mutably borrowed here.)
+                let note = verify_note(self.verify_broken, &self.unreadable);
+                set_dt_error(dt_error, evt_tx, wake, note);
+                continue;
+            }
+            // Record what the hardware shows; `push` diffs against it.
+            z.color = color;
+            z.on = on;
+            self.verify_rewrite = true;
+        }
+    }
     /// How long the loop may sleep before a pending write needs flushing:
     /// `None` when nothing is waiting (or a retry backoff is running), else
     /// the remaining settle time, so the write lands right as the request
@@ -361,6 +474,10 @@ impl DtTracker {
             self.seen = None;
             self.changed_at = None;
             self.retry_at = None;
+            self.last_verify = None;
+            self.strikes.clear();
+            // Off/on is a fresh start: give every selector another chance.
+            self.unreadable.clear();
             return;
         };
         let resolved = resolve_dt(want, state.master);
@@ -369,6 +486,10 @@ impl DtTracker {
         if self.seen.as_ref() != Some(&resolved) {
             self.seen = Some(resolved);
             self.changed_at = Some(Instant::now());
+            // The user moved the target while a verify rewrite was still
+            // waiting (only possible during a retry backoff): the coming
+            // write is theirs now.
+            self.verify_rewrite = false;
             return;
         }
         if self.applied.as_ref() == Some(&resolved) {
@@ -422,7 +543,19 @@ impl DtTracker {
             Ok(()) => {
                 self.applied = Some(resolved);
                 self.retry_at = None;
-                set_dt_error(dt_error, evt_tx, wake, None);
+                // A fresh write: give verify a full period before judging it.
+                // A user change wipes the strike history; a verify-triggered
+                // rewrite keeps it (that's what it's counting).
+                self.last_verify = Some(Instant::now());
+                if self.verify_rewrite {
+                    self.verify_rewrite = false;
+                } else {
+                    self.strikes.clear();
+                }
+                // Clears a transient write error, but keeps any standing
+                // verify note (unreadable selectors) visible.
+                let note = self.verify_note();
+                set_dt_error(dt_error, evt_tx, wake, note);
             }
             Err((done, e)) => {
                 // Keep what did land so the retry only re-sends the failed
@@ -456,6 +589,34 @@ impl DtTracker {
                 set_dt_error(dt_error, evt_tx, wake, Some(e));
             }
         }
+    }
+}
+
+/// Standing status about what verify can't cover — re-asserted after every
+/// successful write so it isn't wiped along with a transient error.
+fn verify_note(broken: bool, unreadable: &[u16]) -> Option<String> {
+    if broken {
+        return Some("case read-back unavailable — hold won't re-assert the case".into());
+    }
+    if unreadable.is_empty() {
+        return None;
+    }
+    let names: Vec<&str> = unreadable.iter().map(|a| area_name(*a)).collect();
+    Some(format!(
+        "{} doesn't echo our writes — hold isn't re-asserting it",
+        names.join(", ")
+    ))
+}
+
+/// Human name for a case selector, matching the cards in the UI.
+fn area_name(area: u16) -> &'static str {
+    match area {
+        dt::area::ALL => "the whole case",
+        dt::area::FRONT => "the front",
+        dt::area::TOP => "the top",
+        dt::area::REAR => "the rear",
+        dt::area::AUX => "the aux area",
+        _ => "an area",
     }
 }
 

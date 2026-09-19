@@ -253,9 +253,15 @@ pub fn apply_static(wmi: &Wmi, area: u16, color: Rgb, on: bool) -> Result<u64> {
 }
 
 /// Read back an area's color register (selector echo reads zero — see
-/// [`unpack_echo`]).
+/// [`unpack_echo`]). `GetGamingRgbSetting` takes a `UInt32` selector (the
+/// probe toolkit sweeps it as `[uint32]`), so this goes through the u32
+/// reader, not the u64-as-string packer the setters use. Read-only.
+///
+/// Whether the echo is truly per-area (sel 4 → front's register) or always
+/// the last-written register is not yet confirmed on hardware; the engine's
+/// hold re-assert self-calibrates for that (see `engine::DtTracker`).
 pub fn get_color(wmi: &Wmi, area: u16) -> Result<(Rgb, u8)> {
-    let word = wmi.call_packed("GetGamingRgbSetting", area as u64)?;
+    let word = wmi.call_u32("GetGamingRgbSetting", area as u32)?;
     Ok(unpack_echo(word))
 }
 
