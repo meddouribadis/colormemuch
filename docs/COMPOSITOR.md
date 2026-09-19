@@ -84,6 +84,11 @@ repaint on its own next event; pair with Hold if that matters.)
 
 ## Compositor UI (Feature 3)
 
+> **Layout note (2026-09):** the right-hand "persistence spine" panel described
+> below was folded into the toolbar — a status pill (Held · Service / Holding /
+> Live / Offline) plus the Hold and Battery-saver toggles in the ⚙ settings
+> popover. The concepts are unchanged; only where they live.
+
 - **Persistence spine** (right panel): connection + ownership line
   (`Owner: colormemuch` / `Acer`), the **Hold against Acer** toggle, a tier
   legend, and per-selection **Save to keyboard** when the mode supports it.

@@ -309,17 +309,15 @@ fn push_dt(
     };
     // Global first (if requested), then per-area overrides in order — each a
     // full captured-shape transaction. Slow by design (see throttling above);
-    // a 5-area push costs ~0.5 s of WMI round-trips.
-    let mut res = if want.on {
-        dt::apply_static(w, dt::area::ALL, want.color, true)
-    } else {
-        dt::apply_static(w, dt::area::ALL, want.color, false)
-    };
+    // a 5-area push costs ~0.5 s of WMI round-trips. Master brightness scales
+    // the case like every other device.
+    let m = state.master;
+    let mut res = apply_dt_zone(w, dt::area::ALL, &scale(want.color, m), want.on, want.effect);
     for a in &want.areas {
         if res.is_err() {
             break;
         }
-        res = dt::apply_static(w, a.area, a.color, a.on);
+        res = apply_dt_zone(w, a.area, &scale(a.color, m), a.on, a.effect);
     }
     match res {
         Ok(_) => {
@@ -329,6 +327,28 @@ fn push_dt(
         }
         Err(e) => set_dt_error(dt_error, evt_tx, wake, Some(e.to_string())),
     }
+}
+
+/// One DT zone write with its effect gate. Non-static effects have no capture
+/// behind them, so they report an honest error (sticky-deduped by the caller)
+/// instead of firing guessed firmware bytes. Returns `Err(())` for gate
+/// rejections so the caller surfaces them exactly like transport failures.
+fn apply_dt_zone(
+    w: &Wmi,
+    area: u16,
+    color: &Rgb,
+    on: bool,
+    effect: dt::DtEffect,
+) -> Result<(), String> {
+    if !effect.is_supported() {
+        return Err(format!(
+            "effect '{}' has no Frida capture yet — static only",
+            effect.label()
+        ));
+    }
+    dt::apply_static(w, area, *color, on)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// Report a DT status change only when the error text actually changes, so a
@@ -458,12 +478,20 @@ fn connect() -> Result<(OpenRgb, Vec<Controller>), String> {
     // AcerDTDIMM on the OpenRGB server, but the server is a showroom there:
     // every write is accepted and nothing reaches the LEDs (proven on
     // hardware — PredatorSense drives them over WMI instead, see `dt`).
-    // Listing them would offer dead controls next to the live CASE section,
-    // so they are filtered here, once, for every host. Laptop controllers
-    // (AcerHID*) and third-party ones (Logitech, …) are untouched.
-    let (live, dead): (Vec<_>, Vec<_>) = ctrls
-        .into_iter()
-        .partition(|c| !c.name.to_uppercase().starts_with("ACERDT"));
+    // Third-party peripherals (Logitech, …) are excluded on this branch too:
+    // this build owns the tower case, nothing else. Laptop controllers
+    // (AcerHID*) stay untouched.
+    // Listing any of these would offer dead or out-of-scope controls next to
+    // the live CASE section, so they are filtered here, once, for every host.
+    let (live, dead): (Vec<_>, Vec<_>) = ctrls.into_iter().partition(|c| {
+        // Match name + vendor: Logitech hides its brand out of some device
+        // names ("G502 HERO Gaming Mouse" only carries it in the vendor).
+        let hay = format!("{} {}", c.name, c.vendor).to_uppercase();
+        !hay.starts_with("ACERDT")
+            && !hay.contains("LOGITECH")
+            && !hay.contains("G502")
+            && !hay.contains("G512")
+    });
     for d in &dead {
         eprintln!("engine: hiding inert OpenRGB controller '{}' (WMI owns it)", d.name);
     }

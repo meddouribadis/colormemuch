@@ -69,12 +69,53 @@ use crate::wmi::{Result, Wmi};
 
 use serde::{Deserialize, Serialize};
 
+/// Firmware effect for a DT zone.
+///
+/// Only [`DtEffect::Static`] is capture-backed (Frida: behavior sel + rgb
+/// word). The rest are structural placeholders so the UI can offer the full
+/// menu today and light up options as captures land — the engine refuses them
+/// with an honest error instead of guessing firmware bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DtEffect {
+    Static,
+    Breathing,
+    Wave,
+    Rainbow,
+}
+
+impl Default for DtEffect {
+    fn default() -> Self {
+        Self::Static
+    }
+}
+
+impl DtEffect {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Static => "Static",
+            Self::Breathing => "Breathing",
+            Self::Wave => "Wave",
+            Self::Rainbow => "Rainbow",
+        }
+    }
+    /// `true` once a Frida capture backs this effect for `area`.
+    /// Global + front static are proven; everything else awaits captures.
+    pub fn is_supported(self) -> bool {
+        matches!(self, Self::Static)
+    }
+    pub fn all() -> [Self; 4] {
+        [Self::Static, Self::Breathing, Self::Wave, Self::Rainbow]
+    }
+}
+
 /// Global static case state (v1 scope: the whole case minus RAM, one color).
 /// `None` in [`crate::engine::EngineState`] means "don't touch the case".
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DtState {
     pub color: Rgb,
     pub on: bool,
+    #[serde(default)]
+    pub effect: DtEffect,
     /// Per-area overrides, applied after the global (if any), in order.
     /// FRONT is capture-backed; TOP/REAR/AUX are experimental until their
     /// own Frida captures land (same shape, unconfirmed sel semantics).
@@ -88,6 +129,8 @@ pub struct AreaCmd {
     pub area: u16,
     pub color: Rgb,
     pub on: bool,
+    #[serde(default)]
+    pub effect: DtEffect,
 }
 
 impl Default for DtState {
@@ -95,6 +138,7 @@ impl Default for DtState {
         Self {
             color: Rgb(0x00, 0xE5, 0xFF),
             on: true,
+            effect: DtEffect::Static,
             areas: Vec::new(),
         }
     }

@@ -14,7 +14,9 @@ the README doesn't: how to work in here.
 | Path | Role |
 |---|---|
 | `src/main.rs` | Entry point + the three identity constants (`APP_NAME`, `APP_WINDOW_TITLE`, `APP_GH_REPO`). Single source of truth — don't duplicate the app name elsewhere. |
-| `src/app.rs` | egui shell: menu bar, panels, update-status wiring. |
+| `src/app.rs` | egui shell: installs the theme, draws the top toolbar (status pill, ⚙ settings popover with the updater), hosts `ui::RgbControl`, tray/close-to-tray. |
+| `src/ui/` | The screen. `theme.rs` (tokens, Inter type scale, egui `Style`) and `widgets.rs` (segmented control, toggle, card, pill, list row, toast…) are the design system; one file per view: `sidebar`, `toolbar`, `case` (PO5-660 tower), `zones` (per-zone / hardware editor), `library` (effect editor + inspector). `mod.rs` owns state + `setup.json` persistence. Never hard-code colors or sizes in a view — reach for `theme::tokens`. |
+| `assets/fonts/` | Inter (Regular/Medium/SemiBold, OFL — `LICENSE.txt` alongside), embedded via `include_bytes!`. |
 | `src/config.rs` | JSON config persisted under `%APPDATA%`. |
 | `src/git_update.rs` | Self-updater — polls the GitHub releases API, downloads the `.msi`. |
 | `build.rs` | Derives `APP_VERSION` from the latest `v*` git tag; embeds the winres icon. |

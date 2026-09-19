@@ -5,7 +5,6 @@ use std::sync::mpsc;
 
 pub struct ColormemuchApp {
     pub config: Config,
-    pub status: Option<String>,
 
     // The RGB control screen.
     #[cfg(windows)]
@@ -24,6 +23,12 @@ pub struct ColormemuchApp {
 impl ColormemuchApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let config = Config::load();
+        #[cfg(windows)]
+        {
+            crate::ui::theme::install_fonts(&cc.egui_ctx);
+            crate::ui::theme::apply(&cc.egui_ctx, config.dark_mode);
+        }
+        #[cfg(not(windows))]
         cc.egui_ctx.set_visuals(if config.dark_mode {
             egui::Visuals::dark()
         } else {
@@ -31,7 +36,7 @@ impl ColormemuchApp {
         });
         cc.egui_ctx.set_zoom_factor(config.zoom);
 
-        // Kick off an update check in the background so the status bar can surface it.
+        // Kick off an update check in the background so the toolbar can surface it.
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let _ = tx.send(crate::git_update::check_latest_release());
@@ -39,7 +44,6 @@ impl ColormemuchApp {
 
         Self {
             config,
-            status: None,
             #[cfg(windows)]
             rgb: crate::ui::RgbControl::new(&cc.egui_ctx),
             #[cfg(windows)]
@@ -82,44 +86,33 @@ impl eframe::App for ColormemuchApp {
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
 
-        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button("Quit").clicked() {
-                        std::process::exit(0);
-                    }
-                });
-                ui.menu_button("View", |ui| {
-                    if ui.checkbox(&mut self.config.dark_mode, "Dark mode").changed() {
-                        ctx.set_visuals(if self.config.dark_mode {
-                            egui::Visuals::dark()
-                        } else {
-                            egui::Visuals::light()
-                        });
-                        self.config.save();
-                    }
-                });
-            });
-        });
-
-        egui::TopBottomPanel::bottom("bottom_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                crate::git_update::render(
-                    ui,
-                    &mut self.update_state,
-                    &mut self.update_error,
-                    &mut self.update_rx,
-                );
-                ui.separator();
-                if let Some(s) = self.status.as_ref() {
-                    ui.label(s);
-                }
-            });
-        });
-
-        // The RGB control screen owns the left device panel + central editor.
         #[cfg(windows)]
-        self.rgb.show(ctx);
+        {
+            let tk = crate::ui::theme::tokens_for(self.config.dark_mode);
+            egui::TopBottomPanel::top("toolbar")
+                .exact_height(crate::ui::toolbar_height())
+                .show_separator_line(false)
+                .frame(
+                    egui::Frame::none()
+                        .fill(tk.side)
+                        .stroke(egui::Stroke::new(1.0_f32, tk.stroke))
+                        .inner_margin(egui::Margin::symmetric(16.0, 0.0)),
+                )
+                .show(ctx, |ui| {
+                    let update_available = matches!(self.update_state, UpdateState::Available(_));
+                    self.rgb.toolbar(ui, &mut self.config, update_available, |ui| {
+                        crate::git_update::render(
+                            ui,
+                            &mut self.update_state,
+                            &mut self.update_error,
+                            &mut self.update_rx,
+                        );
+                    });
+                });
+
+            // The RGB control screen owns the sidebar + central editor.
+            self.rgb.show(ctx);
+        }
 
         #[cfg(not(windows))]
         egui::CentralPanel::default().show(ctx, |ui| {
