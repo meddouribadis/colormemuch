@@ -9,7 +9,7 @@ use colormemuch::dt::{area, AreaCmd, DtEffect};
 use colormemuch::rgb::Rgb;
 
 use super::theme::{self, tokens, SP_L, SP_M, SP_S, SP_XS};
-use super::widgets::{self, arr32, card, card_header, chip, color_field, form_row, toggle, Segment};
+use super::widgets::{self, arr32, card, card_header, chip, color_field, form_row, toggle};
 use super::{DtSetup, RgbControl};
 
 const DEFAULT_COLOR: [u8; 3] = [0x00, 0xE5, 0xFF];
@@ -116,14 +116,18 @@ impl RgbControl {
                 ui.add_space(SP_M);
                 widgets::divider(ui);
                 ui.add_space(SP_XS);
-                form_row(ui, "Color", |ui| {
-                    if color_field(ui, &mut dt.color) {
+                form_row(ui, "Effect", |ui| {
+                    if dt_effect_picker(ui, "dt-fx-global", area::ALL, &mut dt.effect) {
                         changed = true;
                     }
                 });
-                form_row(ui, "Effect", |ui| {
-                    if dt_effect_picker(ui, "dt-fx-global", &mut dt.effect) {
-                        changed = true;
+                form_row(ui, "Color", |ui| {
+                    if dt.effect.takes_color() {
+                        if color_field(ui, &mut dt.color) {
+                            changed = true;
+                        }
+                    } else {
+                        ui.label(theme::hint(ui, "This effect uses its own palette."));
                     }
                 });
             });
@@ -228,11 +232,22 @@ impl RgbControl {
                 ui.add_space(SP_S);
                 widgets::divider(ui);
                 ui.add_space(SP_XS);
-                form_row(ui, "Color", |ui| {
-                    let mut c = [entry.color.0, entry.color.1, entry.color.2];
-                    if color_field(ui, &mut c) {
-                        entry.color = Rgb(c[0], c[1], c[2]);
+                form_row(ui, "Effect", |ui| {
+                    let mut fx = entry.effect;
+                    if dt_effect_picker(ui, ("dt-fx", sel), sel, &mut fx) {
+                        entry.effect = fx;
                         changed = true;
+                    }
+                });
+                form_row(ui, "Color", |ui| {
+                    if entry.effect.takes_color() {
+                        let mut c = [entry.color.0, entry.color.1, entry.color.2];
+                        if color_field(ui, &mut c) {
+                            entry.color = Rgb(c[0], c[1], c[2]);
+                            changed = true;
+                        }
+                    } else {
+                        ui.label(theme::hint(ui, "Built-in palette"));
                     }
                 });
                 form_row(ui, "Power", |ui| {
@@ -240,13 +255,6 @@ impl RgbControl {
                         changed = true;
                     }
                     ui.label(theme::caption(ui, if entry.on { "On" } else { "Off" }));
-                });
-                form_row(ui, "Effect", |ui| {
-                    let mut fx = entry.effect;
-                    if dt_effect_picker(ui, ("dt-fx", sel), &mut fx) {
-                        entry.effect = fx;
-                        changed = true;
-                    }
                 });
             }
         });
@@ -270,20 +278,42 @@ impl RgbControl {
     }
 }
 
-/// Firmware-effect picker: Static applies now; the rest are disabled with the
-/// reason on hover, lighting up as Frida captures land.
-fn dt_effect_picker(ui: &mut egui::Ui, id: impl std::hash::Hash, current: &mut DtEffect) -> bool {
-    let segs: Vec<Segment<DtEffect>> = DtEffect::all()
-        .into_iter()
-        .map(|fx| {
-            let s = Segment::new(fx, fx.label());
-            if fx.is_supported() {
-                s
-            } else {
-                s.enabled(false)
-                    .hint("Not yet captured from PredatorSense — coming once its firmware bytes are verified.")
+/// Firmware-effect picker — PredatorSense's full menu, every entry captured
+/// and replayed byte-exact at whole-case scope. A combo (twelve entries don't
+/// fit a segmented control inside an area card); palette effects are marked
+/// so the missing color row is no surprise. On an area card only Static is
+/// enabled: the other ids were never captured with a patched selector, and
+/// uncaptured behavior payloads stall the controller.
+fn dt_effect_picker(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash,
+    area_sel: u16,
+    current: &mut DtEffect,
+) -> bool {
+    let mut changed = false;
+    egui::ComboBox::from_id_source(id)
+        .width(180.0)
+        .selected_text(current.label())
+        .show_ui(ui, |ui| {
+            for fx in DtEffect::all() {
+                let text = if fx.takes_color() {
+                    fx.label().to_string()
+                } else {
+                    format!("{}  · palette", fx.label())
+                };
+                let ok = fx.is_supported_for(area_sel);
+                let r = ui.add_enabled(ok, egui::SelectableLabel::new(*current == fx, text));
+                if !ok {
+                    r.clone().on_disabled_hover_text(
+                        "Captured for the whole case only — pick it on the Whole case card, \
+                         or capture PredatorSense applying it to this area.",
+                    );
+                }
+                if r.clicked() && *current != fx {
+                    *current = fx;
+                    changed = true;
+                }
             }
-        })
-        .collect();
-    widgets::segmented(ui, id, current, &segs)
+        });
+    changed
 }

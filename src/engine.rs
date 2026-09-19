@@ -295,16 +295,29 @@ struct ZoneWrite {
 
 /// Flatten the requested case state into the writes it implies: the global
 /// broadcast first, then each per-area override.
+///
+/// The resolved color is what actually goes on the wire: master-scaled RGB
+/// for color effects, black for palette effects (Rainbow / Rising / Meteor —
+/// PredatorSense sends black and the firmware ignores it). That keeps the
+/// diff honest (changing the picker under Rainbow is a no-op) and lets
+/// [`DtTracker::verify`] compare the echo against the bytes we sent.
 fn resolve_dt(want: &DtState, master: f32) -> Vec<ZoneWrite> {
+    let wire_color = |c: Rgb, fx: dt::DtEffect| {
+        if fx.takes_color() {
+            scale(c, master)
+        } else {
+            Rgb(0, 0, 0)
+        }
+    };
     let mut out = vec![ZoneWrite {
         area: dt::area::ALL,
-        color: scale(want.color, master),
+        color: wire_color(want.color, want.effect),
         on: want.on,
         effect: want.effect,
     }];
     out.extend(want.areas.iter().map(|a| ZoneWrite {
         area: a.area,
-        color: scale(a.color, master),
+        color: wire_color(a.color, a.effect),
         on: a.on,
         effect: a.effect,
     }));
@@ -630,10 +643,11 @@ fn write_zones(w: &Wmi, zones: &[ZoneWrite]) -> Result<(), (usize, String)> {
     Ok(())
 }
 
-/// One DT zone write with its effect gate. Non-static effects have no capture
-/// behind them, so they report an honest error instead of firing guessed
-/// firmware bytes. Gate rejections and transport failures both come back as
-/// `Err(String)`; [`DtTracker`] surfaces them (deduped) and owns the retry.
+/// One DT zone write with its effect gate. The gate is the last line of
+/// defence against writing an uncaptured behavior payload (those stall the
+/// controller); today every [`dt::DtEffect`] is captured. Gate rejections and
+/// transport failures both come back as `Err(String)`; [`DtTracker`] surfaces
+/// them (deduped) and owns the retry.
 fn apply_dt_zone(
     w: &Wmi,
     area: u16,
@@ -641,13 +655,13 @@ fn apply_dt_zone(
     on: bool,
     effect: dt::DtEffect,
 ) -> Result<(), String> {
-    if !effect.is_supported() {
+    if !effect.is_supported_for(area) {
         return Err(format!(
-            "effect '{}' has no Frida capture yet — static only",
+            "'{}' is captured for the whole case only — per-area needs its own capture",
             effect.label()
         ));
     }
-    dt::apply_static(w, area, *color, on)
+    dt::apply_effect(w, area, *color, on, effect)
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
