@@ -153,6 +153,9 @@ struct DtSetup {
     on: bool,
     #[serde(default)]
     effect: DtEffect,
+    /// Animation speed, whole case only (Static has none; areas are Static-only).
+    #[serde(default = "colormemuch::dt::speed::default")]
+    speed: u8,
     /// Per-area overrides (TOP/FRONT/REAR/AUX). FRONT is capture-backed;
     /// the rest are experimental until their own Frida captures land.
     #[serde(default)]
@@ -165,6 +168,7 @@ impl DtSetup {
             color: Rgb(self.color[0], self.color[1], self.color[2]),
             on: self.on,
             effect: self.effect,
+            speed: self.speed,
             areas: self.areas.clone(),
         }
     }

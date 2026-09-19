@@ -44,8 +44,8 @@
 //!
 //! ### Behavior array (SET)
 //!
-//! `[sel_lo][sel_hi][01][EFFECT][0f][03][03][TAIL]` + 8 zero pad. Two bytes
-//! move across a capture of every effect in PredatorSense's menu
+//! `[sel_lo][sel_hi][01][EFFECT][0f][SPEED][03][TAIL]` + 8 zero pad. Two
+//! bytes move across a capture of every effect in PredatorSense's menu
 //! (`effects.md` + `effects2.md`, 2026-09-19, global scope): byte 3 (effect
 //! id) and byte 7 (`0x01` for Snake and Stack, else `0x00`). The color word
 //! then varies in whether PS sends the picked RGB or black, and in the
@@ -66,10 +66,18 @@
 //! | `0x0e` | Magique | Magic | 00 | black · 02 |
 //! | `0x0f` | Serpent | Snake | **01** | black · **03** |
 //!
-//! Bytes 4..6 (`0f 03 03`) were identical in every capture — likely PS's
-//! speed/brightness slider state, replayed verbatim until captured at other
-//! positions. Each effect's (id, byte 7, trailer, RGB-or-black) tuple is
+//! Byte 5 is the **speed slider** (`speed.txt`, 2026-09-19: dragging PS's
+//! slider under Snake, global scope, walks byte 5 through
+//! `01 02 03 04 05 06 07 08 0a` with every other byte — and the color word —
+//! unchanged). The effect captures were all made at PS's default position,
+//! `0x03`. Bytes 4 and 6 (`0f`, `03`) never moved in any capture and stay
+//! opaque. Each effect's (id, byte 7, trailer, RGB-or-black) tuple is
 //! replayed exactly as captured — see [`DtEffect::spec`].
+//!
+//! The slider capture is Snake-only; the speed byte is applied to every
+//! animated effect on the strength of the shared layout, and pinned to the
+//! captured default for Static (which has nothing to animate). Position 9
+//! was skipped in the drag and is interpolated between captured 8 and 10.
 //!
 //! ## What we deliberately do NOT do
 //!
@@ -194,6 +202,25 @@ impl DtEffect {
         self.spec().takes_color
     }
 
+    /// Whether the speed byte means anything for this effect. Static has
+    /// nothing to animate, so it always ships the captured default and the UI
+    /// hides the slider; every other entry animates.
+    pub fn has_speed(self) -> bool {
+        self != Self::Static
+    }
+
+    /// The speed byte that actually goes on the wire for this effect: the
+    /// request clamped into [`speed`]'s range, or the captured default when
+    /// the effect has no speed. The single normalisation point — the engine
+    /// diffs on it and [`behavior_for`] writes it, so they can't drift.
+    pub fn wire_speed(self, speed: u8) -> u8 {
+        if self.has_speed() {
+            speed::clamp(speed)
+        } else {
+            speed::DEFAULT
+        }
+    }
+
     /// `true` when a Frida capture backs this effect's behavior bytes for
     /// `area`. All twelve are captured at global scope (`area::ALL`). Static is
     /// additionally proven per-area (front capture, patched selector). Any
@@ -235,6 +262,11 @@ pub struct DtState {
     pub on: bool,
     #[serde(default)]
     pub effect: DtEffect,
+    /// Animation speed, [`speed::MIN`]`..=`[`speed::MAX`] (behavior byte 5).
+    /// Whole-case only: per-area writes are Static-only, and Static has no
+    /// speed.
+    #[serde(default = "speed::default")]
+    pub speed: u8,
     /// Per-area overrides, applied after the global (if any), in order.
     /// FRONT is capture-backed; TOP/REAR/AUX are experimental until their
     /// own Frida captures land (same shape, unconfirmed sel semantics).
@@ -258,6 +290,7 @@ impl Default for DtState {
             color: Rgb(0x00, 0xE5, 0xFF),
             on: true,
             effect: DtEffect::Static,
+            speed: speed::DEFAULT,
             areas: Vec::new(),
         }
     }
@@ -278,6 +311,26 @@ pub mod area {
     pub const REAR: u16 = 16;
 }
 
+/// Speed slider — behavior byte 5. Captured positions (`speed.txt`, Snake,
+/// global): 1–8 and 10; 9 is interpolated. Every effect capture was taken at
+/// [`DEFAULT`](speed::DEFAULT).
+pub mod speed {
+    pub const MIN: u8 = 1;
+    pub const MAX: u8 = 10;
+    /// PredatorSense's slider position during every effect capture.
+    pub const DEFAULT: u8 = 3;
+
+    /// serde default hook.
+    pub fn default() -> u8 {
+        DEFAULT
+    }
+
+    /// Clamp into the captured range.
+    pub fn clamp(v: u8) -> u8 {
+        v.clamp(MIN, MAX)
+    }
+}
+
 /// Flags byte values observed in the color register.
 pub mod flags {
     /// Output on (static/breathing/wave/rainbow states).
@@ -295,9 +348,10 @@ pub const TRAILER_COLOR: u8 = 0x03;
 pub const TRAILER_PALETTE: u8 = 0x02;
 
 /// Captured `SetGamingLedBehavior` template for static-global (PredatorSense
-/// static color change, global scope). Bytes 0-1 are the sel u16; the rest is
-/// replayed verbatim (likely PS slider state). Only sel = 1 is captured —
-/// do not patch other selectors in without a matching capture.
+/// static color change, global scope). Bytes 0-1 are the sel u16, byte 5 is
+/// the speed slider at its default; the rest is replayed verbatim. Only
+/// sel = 1 is captured — do not patch other selectors in without a matching
+/// capture.
 pub const BEHAVIOR_STATIC_GLOBAL: [u8; 16] = [
     0x01, 0x00, 0x01, 0x00, 0x0f, 0x03, 0x03, 0x00, //
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -313,20 +367,23 @@ pub const BEHAVIOR_STATIC_GLOBAL: [u8; 16] = [
 /// Selectors beyond global + front are the same shape but await their own
 /// capture before shipping (see [`area`]).
 pub fn behavior_static_for(area: u16) -> [u8; 16] {
-    behavior_for(area, DtEffect::Static)
+    behavior_for(area, DtEffect::Static, speed::DEFAULT)
 }
 
 /// Behavior template for any captured effect: the static template with the
-/// selector (bytes 0-1), the effect id (byte 3) and the tail (byte 7) patched
-/// in. Every effect capture is byte-identical to static apart from those, so
-/// this reproduces each of them exactly (see tests). Callers gate on
-/// [`DtEffect::is_supported_for`] — non-static ids are captured for
+/// selector (bytes 0-1), the effect id (byte 3), the speed (byte 5) and the
+/// tail (byte 7) patched in. Every effect capture is byte-identical to static
+/// apart from those, so this reproduces each of them exactly (see tests).
+/// `speed` is clamped to [`speed`]'s range and ignored for effects without
+/// one ([`DtEffect::has_speed`]), which keep the captured default. Callers
+/// gate on [`DtEffect::is_supported_for`] — non-static ids are captured for
 /// `area::ALL` only.
-pub fn behavior_for(area: u16, fx: DtEffect) -> [u8; 16] {
+pub fn behavior_for(area: u16, fx: DtEffect, speed: u8) -> [u8; 16] {
     let spec = fx.spec();
     let mut b = BEHAVIOR_STATIC_GLOBAL;
     b[0..2].copy_from_slice(&area.to_le_bytes());
     b[3] = spec.id;
+    b[5] = fx.wire_speed(speed);
     b[7] = spec.tail;
     b
 }
@@ -412,15 +469,22 @@ pub fn apply_static_global(wmi: &Wmi, color: Rgb) -> Result<u64> {
 /// FRONT is capture-backed; TOP/REAR/AUX share the proven shape but are
 /// marked experimental until their own captures land.
 pub fn apply_static(wmi: &Wmi, area: u16, color: Rgb, on: bool) -> Result<u64> {
-    apply_effect(wmi, area, color, on, DtEffect::Static)
+    apply_effect(wmi, area, color, on, DtEffect::Static, speed::DEFAULT)
 }
 
-/// Apply any captured effect to one area: behavior template (selector +
-/// effect id patched), ~60 ms, then the matching color word — PredatorSense's
-/// exact sequence and timing. `color` is ignored by palette effects (sent as
-/// black, like PredatorSense does).
-pub fn apply_effect(wmi: &Wmi, area: u16, color: Rgb, on: bool, fx: DtEffect) -> Result<u64> {
-    wmi.call_bytes("SetGamingLedBehavior", &behavior_for(area, fx))?;
+/// Apply any captured effect to one area: behavior template (selector,
+/// effect id and speed patched), ~60 ms, then the matching color word —
+/// PredatorSense's exact sequence and timing. `color` is ignored by palette
+/// effects (sent as black, like PredatorSense does); `speed` by Static.
+pub fn apply_effect(
+    wmi: &Wmi,
+    area: u16,
+    color: Rgb,
+    on: bool,
+    fx: DtEffect,
+    speed: u8,
+) -> Result<u64> {
+    wmi.call_bytes("SetGamingLedBehavior", &behavior_for(area, fx, speed))?;
     std::thread::sleep(std::time::Duration::from_millis(60));
     wmi.call_packed("SetGamingRgbSetting", pack_setting_for(area, color, on, fx))
 }
@@ -509,7 +573,11 @@ mod tests {
         // The color PredatorSense had selected during the capture.
         let picked = Rgb(0x5f, 0xe8, 0xff);
         for (fx, behavior, word) in cases {
-            assert_eq!(behavior_for(area::ALL, fx).to_vec(), hex(behavior), "{fx:?} behavior");
+            assert_eq!(
+                behavior_for(area::ALL, fx, speed::DEFAULT).to_vec(),
+                hex(behavior),
+                "{fx:?} behavior"
+            );
             assert_eq!(pack_setting_for(area::ALL, picked, true, fx), word, "{fx:?} color word");
         }
         // `effects2.md`: the four remaining effects. Byte 7 of the behavior
@@ -522,15 +590,50 @@ mod tests {
             (DtEffect::Magic, "0100010e0f0303000000000000000000", 0x0002090000000001),
         ];
         for (fx, behavior, word) in cases2 {
-            assert_eq!(behavior_for(area::ALL, fx).to_vec(), hex(behavior), "{fx:?} behavior");
+            assert_eq!(
+                behavior_for(area::ALL, fx, speed::DEFAULT).to_vec(),
+                hex(behavior),
+                "{fx:?} behavior"
+            );
             assert_eq!(pack_setting_for(area::ALL, picked, true, fx), word, "{fx:?} color word");
         }
         // Static stays the original shape.
-        assert_eq!(behavior_for(area::ALL, DtEffect::Static), BEHAVIOR_STATIC_GLOBAL);
+        assert_eq!(
+            behavior_for(area::ALL, DtEffect::Static, speed::DEFAULT),
+            BEHAVIOR_STATIC_GLOBAL
+        );
         assert_eq!(
             pack_setting_for(area::ALL, Rgb(0x3C, 0xF0, 0x3C), true, DtEffect::Static),
             0x0003093CF03C0001
         );
+    }
+
+    /// `speed.txt` (2026-09-19): PredatorSense's speed slider dragged under
+    /// Snake, global scope. Only byte 5 moves; the color word is constant.
+    #[test]
+    fn speed_reproduces_predatorsense_slider_capture() {
+        let captured: [u8; 9] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0a];
+        for sp in captured {
+            let expect = [
+                0x01, 0x00, 0x01, 0x0f, 0x0f, sp, 0x03, 0x01, //
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ];
+            assert_eq!(behavior_for(area::ALL, DtEffect::Snake, sp), expect, "speed {sp}");
+        }
+        // (The color word stays 0x0003090000000001 throughout — covered by
+        // `effects_reproduce_predatorsense_captures`.)
+        // Out-of-range values clamp into the slider's range.
+        assert_eq!(behavior_for(area::ALL, DtEffect::Wave, 0)[5], speed::MIN);
+        assert_eq!(behavior_for(area::ALL, DtEffect::Wave, 0xff)[5], speed::MAX);
+        // Static has no speed: whatever is asked, it ships the captured
+        // default and stays byte-identical to the static capture.
+        assert_eq!(behavior_for(area::ALL, DtEffect::Static, 9), BEHAVIOR_STATIC_GLOBAL);
+        assert_eq!(
+            behavior_for(area::FRONT, DtEffect::Static, 1),
+            behavior_static_for(area::FRONT)
+        );
+        assert!(!DtEffect::Static.has_speed());
+        assert_eq!(DtEffect::all().iter().filter(|f| f.has_speed()).count(), 11);
     }
 
     #[test]
@@ -559,11 +662,12 @@ mod tests {
         dedup.dedup();
         assert_eq!(ids.len(), dedup.len(), "duplicate effect id");
         for fx in DtEffect::all() {
-            let b = behavior_for(area::FRONT, fx);
+            let b = behavior_for(area::FRONT, fx, speed::DEFAULT);
             assert_eq!(b[3], fx.id());
             assert_eq!(b[7], fx.spec().tail);
             assert_eq!(&b[0..2], &[0x04, 0x00]);
-            // Only bytes 0-1, 3 and 7 ever differ from the static template.
+            // At default speed only bytes 0-1, 3 and 7 differ from the
+            // static template.
             assert_eq!(&b[4..7], &BEHAVIOR_STATIC_GLOBAL[4..7]);
             assert!(b[8..].iter().all(|&x| x == 0));
         }

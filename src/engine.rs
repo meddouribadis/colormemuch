@@ -291,6 +291,9 @@ struct ZoneWrite {
     color: Rgb,
     on: bool,
     effect: dt::DtEffect,
+    /// Behavior byte 5. Whole-case only; per-area writes (Static-only) pin
+    /// the captured default so they stay byte-identical to the front capture.
+    speed: u8,
 }
 
 /// Flatten the requested case state into the writes it implies: the global
@@ -314,12 +317,16 @@ fn resolve_dt(want: &DtState, master: f32) -> Vec<ZoneWrite> {
         color: wire_color(want.color, want.effect),
         on: want.on,
         effect: want.effect,
+        // Normalised like the wire byte, so a slider position under Static
+        // can't produce a spurious diff (and a needless dark-case rewrite).
+        speed: want.effect.wire_speed(want.speed),
     }];
     out.extend(want.areas.iter().map(|a| ZoneWrite {
         area: a.area,
         color: wire_color(a.color, a.effect),
         on: a.on,
         effect: a.effect,
+        speed: dt::speed::DEFAULT,
     }));
     out
 }
@@ -638,7 +645,7 @@ fn area_name(area: u16) -> &'static str {
 /// 60 ms), so callers keep the list as short as the diff allows.
 fn write_zones(w: &Wmi, zones: &[ZoneWrite]) -> Result<(), (usize, String)> {
     for (i, z) in zones.iter().enumerate() {
-        apply_dt_zone(w, z.area, &z.color, z.on, z.effect).map_err(|e| (i, e))?;
+        apply_dt_zone(w, z.area, &z.color, z.on, z.effect, z.speed).map_err(|e| (i, e))?;
     }
     Ok(())
 }
@@ -654,6 +661,7 @@ fn apply_dt_zone(
     color: &Rgb,
     on: bool,
     effect: dt::DtEffect,
+    speed: u8,
 ) -> Result<(), String> {
     if !effect.is_supported_for(area) {
         return Err(format!(
@@ -661,7 +669,7 @@ fn apply_dt_zone(
             effect.label()
         ));
     }
-    dt::apply_effect(w, area, *color, on, effect)
+    dt::apply_effect(w, area, *color, on, effect, speed)
         .map(|_| ())
         .map_err(|e| e.to_string())
 }

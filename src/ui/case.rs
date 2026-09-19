@@ -5,7 +5,7 @@
 
 use eframe::egui::{self, Vec2};
 
-use colormemuch::dt::{area, AreaCmd, DtEffect};
+use colormemuch::dt::{area, speed, AreaCmd, DtEffect};
 use colormemuch::rgb::Rgb;
 
 use super::theme::{self, tokens, SP_L, SP_M, SP_S, SP_XS};
@@ -47,6 +47,7 @@ impl RgbControl {
                         color: DEFAULT_COLOR,
                         on: true,
                         effect: DtEffect::Static,
+                        speed: speed::DEFAULT,
                         areas: Vec::new(),
                     });
                     self.dirty = true;
@@ -84,6 +85,7 @@ impl RgbControl {
                             color: DEFAULT_COLOR,
                             on: true,
                             effect: DtEffect::Static,
+                            speed: speed::DEFAULT,
                             areas: Vec::new(),
                         });
                         self.dirty = true;
@@ -130,6 +132,20 @@ impl RgbControl {
                         ui.label(theme::hint(ui, "This effect uses its own palette."));
                     }
                 });
+                // Speed: behavior byte 5, captured 1–10 (`speed.txt`). Static
+                // has nothing to animate, so the row only shows for effects
+                // that do — the engine pins Static to the captured default.
+                if dt.effect.has_speed() {
+                    form_row(ui, "Speed", |ui| {
+                        ui.spacing_mut().slider_width = 220.0;
+                        let slider = egui::Slider::new(&mut dt.speed, speed::MIN..=speed::MAX)
+                            .show_value(false);
+                        if ui.add(slider).changed() {
+                            changed = true;
+                        }
+                        ui.label(theme::caption(ui, format!("{}", dt.speed)));
+                    });
+                }
             });
         }
         if changed {
