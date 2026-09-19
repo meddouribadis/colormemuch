@@ -113,10 +113,13 @@ impl EngineHandle {
 }
 
 const HOLD_PERIOD: Duration = Duration::from_secs(3);
-/// Minimum gap between two desktop-tower (WMI) transactions — the color
-/// picker streams while dragging and the firmware flickers under back-to-back
-/// writes. Pending values coalesce: change detection re-fires until applied.
-const DT_MIN_INTERVAL: Duration = Duration::from_millis(400);
+/// Desktop-tower (WMI) debounce: a change is written only once the requested
+/// state has stopped moving for this long. The color picker streams dozens of
+/// values per second while dragging, and every transaction blanks the zone
+/// for the firmware's mode-apply — so a drag must collapse into one write.
+const DT_SETTLE: Duration = Duration::from_millis(220);
+/// After a failed DT write, wait this long before replaying the whole state.
+const DT_RETRY: Duration = Duration::from_secs(2);
 const IDLE_TICK: Duration = Duration::from_millis(900);
 const RECONNECT_WAIT: Duration = Duration::from_secs(2);
 const MIN_HZ: f32 = 8.0;
@@ -153,8 +156,7 @@ fn run(wake: Waker, cmd_rx: Receiver<EngineCmd>, evt_tx: Sender<EngineEvent>) {
             None
         }
     };
-    let mut last_dt: Option<DtState> = None;
-    let mut last_dt_push = Instant::now() - DT_MIN_INTERVAL;
+    let mut dt_track = DtTracker::default();
     let mut dt_error: Option<String> = None;
     (wake)();
 
@@ -186,11 +188,15 @@ fn run(wake: Waker, cmd_rx: Receiver<EngineCmd>, evt_tx: Sender<EngineEvent>) {
         // --- render / hold loop --------------------------------------------
         loop {
             let animating = is_animating(&state);
-            let tick = if animating {
+            let mut tick = if animating {
                 Duration::from_secs_f32(1.0 / active_hz(&state))
             } else {
                 IDLE_TICK
             };
+            // A debounced case write is waiting: wake in time to flush it.
+            if dt_track.pending() {
+                tick = tick.min(DT_SETTLE);
+            }
 
             match cmd_rx.recv_timeout(tick) {
                 Ok(EngineCmd::SetState(s)) => state = s,
@@ -256,16 +262,10 @@ fn run(wake: Waker, cmd_rx: Receiver<EngineCmd>, evt_tx: Sender<EngineEvent>) {
                 (wake)();
                 break;
             }
-            push_dt(
-                &wmi,
-                &state,
-                force,
-                &mut last_dt,
-                &mut last_dt_push,
-                &mut dt_error,
-                &evt_tx,
-                &wake,
-            );
+            // The case is firmware state — it keeps itself, so the hold
+            // re-push (`force`) deliberately does not apply to it: a replay
+            // would blank the LEDs every HOLD_PERIOD for nothing.
+            dt_track.push(&wmi, &state, &mut dt_error, &evt_tx, &wake);
             if force {
                 last_forced = Instant::now();
             }
@@ -273,60 +273,185 @@ fn run(wake: Waker, cmd_rx: Receiver<EngineCmd>, evt_tx: Sender<EngineEvent>) {
     }
 }
 
-/// Apply the desktop-tower case state (PO5-660, WMI) if the UI asked for it.
+/// One resolved case write: what a zone should show after master scaling.
+/// The unit of change detection — two equal `ZoneWrite`s never hit the wire.
+#[derive(Clone, PartialEq)]
+struct ZoneWrite {
+    area: u16,
+    color: Rgb,
+    on: bool,
+    effect: dt::DtEffect,
+}
+
+/// Flatten the requested case state into the writes it implies: the global
+/// broadcast first, then each per-area override.
+fn resolve_dt(want: &DtState, master: f32) -> Vec<ZoneWrite> {
+    let mut out = vec![ZoneWrite {
+        area: dt::area::ALL,
+        color: scale(want.color, master),
+        on: want.on,
+        effect: want.effect,
+    }];
+    out.extend(want.areas.iter().map(|a| ZoneWrite {
+        area: a.area,
+        color: scale(a.color, master),
+        on: a.on,
+        effect: a.effect,
+    }));
+    out
+}
+
+/// Desktop-tower (PO5-660, WMI) write scheduler.
+///
+/// Every WMI transaction blanks its zone while the firmware re-applies the
+/// mode, and a broadcast (`area::ALL`) repaints *every* area — so the naive
+/// "replay everything on any change" turned one color pick into a second of
+/// dark case. This tracker does three things instead:
+///
+/// 1. **Debounce** — a change is written only after [`DT_SETTLE`] with no
+///    further change, so a picker drag lands as one transaction.
+/// 2. **Diff** — only zones whose resolved write differs from what was last
+///    applied are sent. An area edit touches that area alone. A global edit
+///    sends the broadcast and then re-applies every override the broadcast
+///    just repainted. A removed override is re-covered by writing the global
+///    values to that one area (same end state as a broadcast, no blink).
+/// 3. **No hold replay** — the case is firmware state; it keeps itself.
 ///
 /// `wmi` is `None` unelevated / off-target — then a requested DT state
 /// surfaces one sticky error instead of failing silently. Writes go through
-/// the captured static-global transaction only (see [`dt`]).
-///
-/// Rate-limited: the egui color picker streams dozens of values per second
-/// while dragging, and the firmware visibly chokes on back-to-back
-/// transactions. At most one push per [`DT_MIN_INTERVAL`]; the pending value
-/// lands on a later tick (change detection keeps it, so nothing is lost).
-#[allow(clippy::too_many_arguments)]
-fn push_dt(
-    wmi: &Option<Wmi>,
-    state: &EngineState,
-    force: bool,
-    last_dt: &mut Option<DtState>,
-    last_push: &mut Instant,
-    dt_error: &mut Option<String>,
-    evt_tx: &Sender<EngineEvent>,
-    wake: &Waker,
-) {
-    let Some(want) = &state.dt else {
-        return;
-    };
-    if !force && last_dt.as_ref() == Some(want) {
-        return;
+/// the captured static transactions only (see [`dt`]).
+#[derive(Default)]
+struct DtTracker {
+    /// What the hardware currently shows, as far as we've written it.
+    applied: Option<Vec<ZoneWrite>>,
+    /// The most recent request and when it last changed (debounce anchor).
+    seen: Option<Vec<ZoneWrite>>,
+    changed_at: Option<Instant>,
+    /// After a failure, don't retry before this.
+    retry_at: Option<Instant>,
+}
+
+impl DtTracker {
+    /// True while a request is waiting to settle or retry — the loop shortens
+    /// its tick so the flush isn't left to the next idle wake-up.
+    fn pending(&self) -> bool {
+        self.seen.is_some()
+            && self.seen != self.applied
+            && !self.retry_at.is_some_and(|t| Instant::now() < t)
     }
-    if !force && last_push.elapsed() < DT_MIN_INTERVAL {
-        return;
-    }
-    let Some(w) = wmi else {
-        set_dt_error(dt_error, evt_tx, wake, Some("case unavailable: not elevated".into()));
-        return;
-    };
-    // Global first (if requested), then per-area overrides in order — each a
-    // full captured-shape transaction. Slow by design (see throttling above);
-    // a 5-area push costs ~0.5 s of WMI round-trips. Master brightness scales
-    // the case like every other device.
-    let m = state.master;
-    let mut res = apply_dt_zone(w, dt::area::ALL, &scale(want.color, m), want.on, want.effect);
-    for a in &want.areas {
-        if res.is_err() {
-            break;
+
+    fn push(
+        &mut self,
+        wmi: &Option<Wmi>,
+        state: &EngineState,
+        dt_error: &mut Option<String>,
+        evt_tx: &Sender<EngineEvent>,
+        wake: &Waker,
+    ) {
+        let Some(want) = &state.dt else {
+            // Case lighting disabled: leave the hardware alone, but forget
+            // what we applied so a re-enable replays in full (PredatorSense
+            // may have repainted meanwhile).
+            self.applied = None;
+            self.seen = None;
+            self.changed_at = None;
+            return;
+        };
+        let resolved = resolve_dt(want, state.master);
+
+        // Debounce: restart the settle timer whenever the request moves.
+        if self.seen.as_ref() != Some(&resolved) {
+            self.seen = Some(resolved);
+            self.changed_at = Some(Instant::now());
+            return;
         }
-        res = apply_dt_zone(w, a.area, &scale(a.color, m), a.on, a.effect);
-    }
-    match res {
-        Ok(_) => {
-            *last_dt = Some(want.clone());
-            *last_push = Instant::now();
-            set_dt_error(dt_error, evt_tx, wake, None);
+        if self.applied.as_ref() == Some(&resolved) {
+            return;
         }
-        Err(e) => set_dt_error(dt_error, evt_tx, wake, Some(e.to_string())),
+        if self.changed_at.is_some_and(|t| t.elapsed() < DT_SETTLE) {
+            return;
+        }
+        if self.retry_at.is_some_and(|t| Instant::now() < t) {
+            return;
+        }
+
+        let Some(w) = wmi else {
+            set_dt_error(dt_error, evt_tx, wake, Some("case unavailable: not elevated".into()));
+            // Nothing can happen until the request changes — don't keep the
+            // loop awake for it.
+            self.applied = self.seen.clone();
+            return;
+        };
+
+        // The writes this change implies, shortest list the diff allows.
+        let plan: Vec<ZoneWrite> = match &self.applied {
+            None => resolved.clone(),
+            Some(prev) if resolved[0] != prev[0] => {
+                // The broadcast repaints every area — re-apply overrides.
+                resolved.clone()
+            }
+            Some(prev) => {
+                // Changed or new overrides only…
+                let mut plan: Vec<ZoneWrite> = resolved[1..]
+                    .iter()
+                    .filter(|z| !prev[1..].contains(z))
+                    .cloned()
+                    .collect();
+                // …plus areas whose override was removed: paint them with the
+                // global values directly instead of broadcasting. (This sends
+                // a per-area transaction to a selector the user already
+                // exercised while the override was on.)
+                let global = &resolved[0];
+                plan.extend(
+                    prev[1..]
+                        .iter()
+                        .filter(|p| !resolved[1..].iter().any(|z| z.area == p.area))
+                        .map(|p| ZoneWrite { area: p.area, ..global.clone() }),
+                );
+                plan
+            }
+        };
+
+        match write_zones(w, &plan) {
+            Ok(()) => {
+                self.applied = Some(resolved);
+                self.retry_at = None;
+                set_dt_error(dt_error, evt_tx, wake, None);
+            }
+            Err((done, e)) => {
+                // Keep what did land so the retry only re-sends the failed
+                // tail instead of blinking every zone again.
+                let landed = &plan[..done];
+                let partial = if landed.first().is_some_and(|z| z.area == dt::area::ALL) {
+                    // A broadcast landed: it repainted every area, so only the
+                    // overrides written after it are still on the hardware.
+                    landed.to_vec()
+                } else {
+                    let mut p = self.applied.clone().unwrap_or_else(|| vec![resolved[0].clone()]);
+                    for z in landed {
+                        match p.iter_mut().find(|q| q.area == z.area) {
+                            Some(slot) => *slot = z.clone(),
+                            None => p.push(z.clone()),
+                        }
+                    }
+                    p
+                };
+                self.applied = if done == 0 && self.applied.is_none() { None } else { Some(partial) };
+                self.retry_at = Some(Instant::now() + DT_RETRY);
+                set_dt_error(dt_error, evt_tx, wake, Some(e));
+            }
+        }
     }
+}
+
+/// Send each write in order; stop at the first failure, reporting how many
+/// landed. Each is a full captured-shape transaction (~2 WMI round-trips +
+/// 60 ms), so callers keep the list as short as the diff allows.
+fn write_zones(w: &Wmi, zones: &[ZoneWrite]) -> Result<(), (usize, String)> {
+    for (i, z) in zones.iter().enumerate() {
+        apply_dt_zone(w, z.area, &z.color, z.on, z.effect).map_err(|e| (i, e))?;
+    }
+    Ok(())
 }
 
 /// One DT zone write with its effect gate. Non-static effects have no capture
